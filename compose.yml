@@ -1,0 +1,31 @@
+# ── miradian ─────────────────────────────────────────────────────────────────
+# Deployed as a Portainer stack on the homelab. Secrets (MCP_CLIENT_ID,
+# MCP_CLIENT_SECRET, MCP_BASE_URL, VAULT_PATH) come from Portainer's stack
+# environment-variable UI, not from a committed .env.
+#
+# Published on loopback and the WireGuard address only — never 0.0.0.0, so the
+# port is not reachable from the LAN or WAN regardless of router config.
+
+services:
+  miradian:
+    build: .
+    container_name: miradian
+    restart: unless-stopped
+    volumes:
+      - ${VAULT_PATH}:/vault
+    environment:
+      VAULT_PATH: /vault
+      MCP_BASE_URL: ${MCP_BASE_URL}
+      MCP_CLIENT_ID: ${MCP_CLIENT_ID}
+      MCP_CLIENT_SECRET: ${MCP_CLIENT_SECRET}
+      MCP_AUTO_APPROVE: ${MCP_AUTO_APPROVE:-true}
+      MCP_PUBLIC_REGISTRATION: ${MCP_PUBLIC_REGISTRATION:-false}
+      MCP_TOKEN_TTL: ${MCP_TOKEN_TTL:-3600}
+      MCP_REFRESH_TOKEN_TTL: ${MCP_REFRESH_TOKEN_TTL:-2592000}
+      MCP_PATH: ${MCP_PATH:-/mcp}
+      SSE_PATH: ${SSE_PATH:-/sse}
+    ports:
+      - "127.0.0.1:27125:8000"
+      - "10.8.0.8:27125:8000"
+    security_opt:
+      - no-new-privileges:true
