@@ -258,6 +258,7 @@ class Vault:
         if not self.root.is_dir():
             raise VaultError(f"Vault path is not a directory: {self.root}")
         self._lock = threading.RLock()
+        self._indexed = False
         self._notes: dict[str, Note] = {}
         self._backlinks: dict[str, set[str]] = {}
         self._stems: dict[str, list[str]] = {}
@@ -301,9 +302,16 @@ class Vault:
     # --- index -------------------------------------------------------------
 
     def refresh(self) -> None:
-        """Re-stat the vault and re-parse only notes whose mtime or size changed."""
+        """Re-stat the vault and re-parse only notes whose mtime or size changed.
+
+        Rebuilding the link graph means resolving every link in the vault, which
+        is the expensive part -- so only do it when a note actually changed. On an
+        unchanged vault this collapses to a directory walk plus a stat per note.
+        """
         with self._lock:
+            changed = not self._indexed
             seen: set[str] = set()
+
             for full in self.root.rglob("*.md"):
                 if not full.is_file() or self._is_ignored(full):
                     continue
@@ -326,11 +334,15 @@ class Vault:
                     mtime=st.st_mtime,
                     size=st.st_size,
                 )
+                changed = True
 
             for gone in set(self._notes) - seen:
                 del self._notes[gone]
+                changed = True
 
-            self._reindex()
+            if changed:
+                self._reindex()
+                self._indexed = True
 
     def _reindex(self) -> None:
         self._stems, self._aliases = {}, {}

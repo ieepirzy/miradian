@@ -57,9 +57,9 @@ shallowest match when a name is ambiguous.
 
 ## Design notes
 
-- **Writes are atomic** (temp file + `os.replace`). The vault is typically a
-  Syncthing replica; a non-atomic write racing another machine's Obsidian
-  produces `sync-conflict-*` files.
+- **Writes are atomic** (temp file + `os.replace`). Vaults are commonly synced
+  (Syncthing, Dropbox, iCloud), and a non-atomic write racing another machine's
+  Obsidian produces conflict files.
 - **Frontmatter round-trips** through `ruamel.yaml`, preserving key order and
   formatting. Agent writes set `ai_generated: true`.
 - **Never touches git.** Writes land as ordinary files; review and commit them
@@ -68,8 +68,11 @@ shallowest match when a name is ambiguous.
   and `*sync-conflict*`. Excalidraw notes stay in the link graph but their
   bodies (embedded blobs) are excluded from content search.
 - **Path containment:** absolute paths and `..` traversal are rejected.
-- The index is in-memory and rebuilt lazily from mtimes. A 250-note vault indexes
-  in ~200 ms; there is no database to keep in sync.
+- The index is in-memory and refreshed lazily from mtimes; there is no database
+  to keep in sync. The link graph is only rebuilt when a note actually changed,
+  so an unchanged vault costs a directory walk plus one stat per note. Measured
+  per-tool-call overhead: ~7 ms at 250 notes, ~30 ms at 1k, ~270 ms at 10k. Very
+  large vaults would want an inotify watcher instead of the walk.
 - **Thread-safe.** FastMCP runs sync tools in a thread pool and agents issue tool
   calls in parallel, so the index is guarded by a reentrant lock. Without it, one
   call rebuilding the index while another reads it crashes the reader.
@@ -100,6 +103,8 @@ lets access tokens stay short-lived (1h) with rotating refresh tokens (30d).
 | `MCP_REFRESH_TOKEN_TTL` | `2592000` | Refresh token lifetime |
 | `MCP_NO_AUTH` | `false` | Local testing only — **never** in deployment |
 | `MCP_PATH` / `SSE_PATH` | `/mcp` / `/sse` | |
+| `BOUND_IP` | `127.0.0.1` | Host address the port is published on. Use a private/VPN interface. Never `0.0.0.0` |
+| `PORT` | `27125` | Host port |
 
 ## Deploy
 
@@ -107,12 +112,15 @@ lets access tokens stay short-lived (1h) with rotating refresh tokens (30d).
 docker compose up -d --build
 ```
 
-`compose.yml` publishes on loopback and the WireGuard address only, never
-`0.0.0.0`, so the port is unreachable from the LAN or WAN regardless of router
-configuration. Secrets come from the Portainer stack's environment-variable UI.
+Copy `.env.example` to `.env` and fill it in.
+
+`compose.yml` publishes on loopback plus `BOUND_IP`, never `0.0.0.0`. Point
+`BOUND_IP` at a private or VPN interface (a WireGuard peer address, say) and the
+port stays unreachable from your LAN and the internet regardless of router
+configuration. It defaults to loopback.
 
 The container runs as the vault directory's owning uid, so writes carry the uid
-the host's Syncthing expects.
+the host expects -- which matters if the vault is a sync replica.
 
 ## Develop
 

@@ -1,10 +1,12 @@
 # ── miradian ─────────────────────────────────────────────────────────────────
-# Deployed as a Portainer stack on the homelab. Secrets (MCP_CLIENT_ID,
-# MCP_CLIENT_SECRET, MCP_BASE_URL, VAULT_PATH) come from Portainer's stack
-# environment-variable UI, not from a committed .env.
+# Secrets (MCP_CLIENT_ID, MCP_CLIENT_SECRET, MCP_BASE_URL, VAULT_PATH) come from
+# the environment -- a .env file, or your orchestrator's env-var UI. Do not
+# commit them.
 #
-# Published on loopback and the WireGuard address only — never 0.0.0.0, so the
-# port is not reachable from the LAN or WAN regardless of router config.
+# BOUND_IP is the host address the server is published on, and it should be a
+# specific interface, never 0.0.0.0. Bind it to a VPN or private address (e.g. a
+# WireGuard peer address) so the port is unreachable from the LAN or the internet
+# regardless of router configuration. It defaults to loopback.
 
 services:
   miradian:
@@ -25,7 +27,7 @@ services:
       MCP_PATH: ${MCP_PATH:-/mcp}
       SSE_PATH: ${SSE_PATH:-/sse}
     ports:
-      - "127.0.0.1:27125:8000"
-      - "10.8.0.8:27125:8000"
+      - "127.0.0.1:${PORT:-27125}:8000"
+      - "${BOUND_IP:-127.0.0.1}:${PORT:-27125}:8000"
     security_opt:
       - no-new-privileges:true
