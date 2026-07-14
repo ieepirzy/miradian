@@ -41,6 +41,13 @@ TOKEN_TTL = int(os.getenv("MCP_TOKEN_TTL", "3600"))
 REFRESH_TOKEN_TTL = int(os.getenv("MCP_REFRESH_TOKEN_TTL", str(30 * 24 * 3600)))
 PORT = int(os.getenv("PORT", "8000"))
 
+# Stamp agent-written notes so they are greppable and distinguishable from your
+# own. On by default -- knowing which notes a model wrote is worth more than a
+# tidy frontmatter block -- but opt out if it fights your vault's conventions.
+MARK_AI_GENERATED = os.getenv("MARK_AI_GENERATED", "true").lower() != "false"
+AI_GENERATED_FIELD = os.getenv("AI_GENERATED_FIELD", "ai_generated")
+STAMP_DATE = os.getenv("STAMP_DATE", "true").lower() != "false"
+
 DEFAULT_LIMIT = 25
 
 vault = Vault(VAULT_PATH)
@@ -317,9 +324,9 @@ def vault_write_note(
 ) -> str:
     """Create or overwrite a note.
 
-    Sets ai_generated: true and a date automatically — the vault's existing
-    convention for marking AI-authored notes. Use vault_edit_note for small
-    changes to an existing note rather than rewriting it wholesale.
+    Stamps the note as AI-written and dates it, unless the server is configured
+    otherwise. Use vault_edit_note for small changes to an existing note rather
+    than rewriting it wholesale.
     """
     try:
         full = vault.resolve_path(path)
@@ -336,8 +343,10 @@ def vault_write_note(
     out = CommentedMap()
     for k, v in (frontmatter or {}).items():
         out[k] = v
-    out.setdefault("date", date.today().isoformat())
-    out["ai_generated"] = True
+    if STAMP_DATE:
+        out.setdefault("date", date.today().isoformat())
+    if MARK_AI_GENERATED:
+        out[AI_GENERATED_FIELD] = True
 
     try:
         rel = vault.write_atomic(path, join_frontmatter(out, content))

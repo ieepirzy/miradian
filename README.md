@@ -61,7 +61,9 @@ shallowest match when a name is ambiguous.
   (Syncthing, Dropbox, iCloud), and a non-atomic write racing another machine's
   Obsidian produces conflict files.
 - **Frontmatter round-trips** through `ruamel.yaml`, preserving key order and
-  formatting. Agent writes set `ai_generated: true`.
+  formatting. Agent writes are stamped `ai_generated: true` so you can always
+  grep for what a model wrote; set `MARK_AI_GENERATED=false` to opt out, or
+  rename the key with `AI_GENERATED_FIELD`.
 - **Never touches git.** Writes land as ordinary files; review and commit them
   yourself. Signing stays with you, not the agent.
 - **Ignored:** `.obsidian/`, `.stversions/`, `.stfolder/`, `.git/`, `.trash/`,
@@ -102,6 +104,9 @@ lets access tokens stay short-lived (1h) with rotating refresh tokens (30d).
 | `MCP_TOKEN_TTL` | `3600` | Access token lifetime |
 | `MCP_REFRESH_TOKEN_TTL` | `2592000` | Refresh token lifetime |
 | `MCP_NO_AUTH` | `false` | Local testing only — **never** in deployment |
+| `MARK_AI_GENERATED` | `true` | Stamp agent-written notes. Set `false` to opt out |
+| `AI_GENERATED_FIELD` | `ai_generated` | Frontmatter key used for that stamp |
+| `STAMP_DATE` | `true` | Add `date:` to new notes. Set `false` to opt out |
 | `MCP_PATH` / `SSE_PATH` | `/mcp` / `/sse` | |
 | `BOUND_IP` | `127.0.0.1` | Host address the port is published on. Use a private/VPN interface. Never `0.0.0.0` |
 | `PORT` | `27125` | Host port |
