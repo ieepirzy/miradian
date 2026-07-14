@@ -168,7 +168,8 @@ Include the port if clients use one:
 |---|---|---|
 | `VAULT_PATH` | `/vault` | Vault mount inside the container |
 | `MCP_BASE_URL` | — | The URL clients **reach** this server at (not the bind address). See below |
-| `MCP_CLIENT_ID` | `miradian` | |
+| `MCP_CLIENT_ID` | `miradian` | An empty value falls back to the default rather than seeding a client with an empty id |
+| `MCP_REDIRECT_URIS` | — | Comma-separated allowlist. **Unset means any redirect_uri is accepted** |
 | `MCP_CLIENT_SECRET` | — | **Required** unless `MCP_NO_AUTH=true` |
 | `MCP_AUTO_APPROVE` | `true` | Skip the consent page |
 | `MCP_PUBLIC_REGISTRATION` | `false` | Keep off: private server |

@@ -33,30 +33,45 @@ logger = logging.getLogger("miradian")
 # Config
 # ---------------------------------------------------------------------------
 
-VAULT_PATH = os.getenv("VAULT_PATH", "/vault")
-BASE_URL = os.getenv("MCP_BASE_URL", "http://localhost:8000")
-CLIENT_ID = os.getenv("MCP_CLIENT_ID", "miradian")
-CLIENT_SECRET = os.getenv("MCP_CLIENT_SECRET", "")
-AUTO_APPROVE = os.getenv("MCP_AUTO_APPROVE", "true").lower() == "true"
-PUBLIC_REGISTRATION = os.getenv("MCP_PUBLIC_REGISTRATION", "false").lower() == "true"
-NO_AUTH = os.getenv("MCP_NO_AUTH", "false").lower() == "true"
-MCP_PATH = os.getenv("MCP_PATH", "/mcp")
-SSE_PATH = os.getenv("SSE_PATH", "/sse")
-TOKEN_TTL = int(os.getenv("MCP_TOKEN_TTL", "3600"))
-REFRESH_TOKEN_TTL = int(os.getenv("MCP_REFRESH_TOKEN_TTL", str(30 * 24 * 3600)))
-PORT = int(os.getenv("PORT", "8000"))
+def _env(name: str, default: str = "") -> str:
+    """os.getenv, but treat a defined-but-empty variable as absent.
+
+    Compose and Portainer happily pass through a variable set to nothing, and
+    os.getenv then returns "" rather than the default -- which is how this server
+    first went live seeding an OAuth client whose id was the empty string.
+    """
+    return (os.getenv(name) or "").strip() or default
+
+
+VAULT_PATH = _env("VAULT_PATH", "/vault")
+BASE_URL = _env("MCP_BASE_URL", "http://localhost:8000")
+CLIENT_ID = _env("MCP_CLIENT_ID", "miradian")
+CLIENT_SECRET = _env("MCP_CLIENT_SECRET")
+
+# Allowlist of redirect URIs for the seeded client, comma-separated. Without it
+# origo accepts ANY redirect_uri: anyone who learns the client id can start an
+# authorize flow and have the code delivered to a URI they control.
+REDIRECT_URIS = [u.strip() for u in _env("MCP_REDIRECT_URIS").split(",") if u.strip()]
+AUTO_APPROVE = _env("MCP_AUTO_APPROVE", "true").lower() == "true"
+PUBLIC_REGISTRATION = _env("MCP_PUBLIC_REGISTRATION", "false").lower() == "true"
+NO_AUTH = _env("MCP_NO_AUTH", "false").lower() == "true"
+MCP_PATH = _env("MCP_PATH", "/mcp")
+SSE_PATH = _env("SSE_PATH", "/sse")
+TOKEN_TTL = int(_env("MCP_TOKEN_TTL", "3600"))
+REFRESH_TOKEN_TTL = int(_env("MCP_REFRESH_TOKEN_TTL", str(30 * 24 * 3600)))
+PORT = int(_env("PORT", "8000"))
 
 # Stamp agent-written notes so they are greppable and distinguishable from your
 # own. On by default -- knowing which notes a model wrote is worth more than a
 # tidy frontmatter block -- but opt out if it fights your vault's conventions.
-MARK_AI_GENERATED = os.getenv("MARK_AI_GENERATED", "true").lower() != "false"
-AI_GENERATED_FIELD = os.getenv("AI_GENERATED_FIELD", "ai_generated")
-STAMP_DATE = os.getenv("STAMP_DATE", "true").lower() != "false"
+MARK_AI_GENERATED = _env("MARK_AI_GENERATED", "true").lower() != "false"
+AI_GENERATED_FIELD = _env("AI_GENERATED_FIELD", "ai_generated")
+STAMP_DATE = _env("STAMP_DATE", "true").lower() != "false"
 
 # strict: refuse writes that break the schema. warn: write, but report.
 # off: no schema at all. A vault with no schema note degrades to off on its own,
 # so miradian still works on a vault that has never heard of any of this.
-SCHEMA_MODE = os.getenv("SCHEMA_MODE", "strict").lower()
+SCHEMA_MODE = _env("SCHEMA_MODE", "strict").lower()
 
 DEFAULT_LIMIT = 25
 
@@ -833,6 +848,7 @@ if not NO_AUTH:
     auth = OAuthProvider(
         base_url=BASE_URL,
         clients={CLIENT_ID: CLIENT_SECRET},
+        client_redirect_uris={CLIENT_ID: REDIRECT_URIS} if REDIRECT_URIS else None,
         auto_approve=AUTO_APPROVE,
         public_registration=PUBLIC_REGISTRATION,
         token_ttl=TOKEN_TTL,
@@ -866,6 +882,30 @@ async def _lifespan(scope):
         async with _sse_lifespan(scope):
             vault.refresh()
             logger.info("miradian: indexed %d notes from %s", len(vault.notes()), VAULT_PATH)
+
+            if not NO_AUTH:
+                logger.info("auth: client_id=%r base_url=%s", CLIENT_ID, BASE_URL)
+                if not REDIRECT_URIS:
+                    logger.warning(
+                        "auth: no MCP_REDIRECT_URIS set — any redirect_uri will be accepted. "
+                        "Anyone who learns the client id can have an auth code delivered to a "
+                        "URI they control. Set MCP_REDIRECT_URIS to the URIs your client uses."
+                    )
+                if BASE_URL.startswith("http://localhost"):
+                    logger.warning(
+                        "auth: MCP_BASE_URL is still the default (%s). It must be the URL clients "
+                        "actually reach this server at, or their tokens bind to the wrong resource "
+                        "and every call 401s.",
+                        BASE_URL,
+                    )
+
+            sch = _schema()
+            logger.info(
+                "schema: %s",
+                f"{SCHEMA_MODE}, {len(sch.tags)} tags, enums={list(sch.enums)}"
+                if sch
+                else "none found in vault — writes are not validated",
+            )
             yield
 
 
