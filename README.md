@@ -38,6 +38,13 @@ returning `has_more`/`next_offset`), and all take `response_format=markdown|json
 |---|---|
 | `vault_search` | Grep content *and* frontmatter, with tag / frontmatter / path filters |
 
+**Schema**
+| Tool | Purpose |
+|---|---|
+| `vault_get_schema` | The frontmatter schema this vault enforces |
+| `vault_list_tags` | Registered tags with usage counts; `similar_to` finds the one you meant |
+| `vault_create_tag` | Deliberately register a genuinely new tag |
+
 **Graph**
 | Tool | Purpose |
 |---|---|
@@ -54,6 +61,34 @@ Link parsing covers `[[Note]]`, `[[Note|alias]]`, `[[Note#heading]]`,
 shallowest match when a name is ambiguous.
 
 **Markdown only.** Images, PDFs, and other binaries are ignored entirely.
+
+## Frontmatter as an index
+
+Frontmatter is only useful if you can query it — find every `active` project, or
+everything tagged `ai`. That breaks the moment the vocabulary drifts: `wip` vs
+`in progress` vs `In Progress` are three rows in the index and each is invisible
+to a search for the others.
+
+So miradian enforces a schema **defined by the vault itself**, in `METADATA.md`:
+
+- **Closed vocabularies.** `vault_type` and `status` are fixed lists. A write
+  using anything else is refused, with the near-match named.
+- **Governed tags.** `tags` is open but registered. An unregistered tag is
+  refused, pointing at close existing ones; registering a new one is a deliberate
+  act (`vault_create_tag`), because a tag born of a typo is indistinguishable
+  from one added on purpose, and the first kind silently splits the index.
+- **Case is folded** on controlled fields, so `Branding` can't become a second
+  `branding`. Prose fields (`title`, `summary`, `source`) keep their case.
+- **`date` and `ai_generated` are server-injected** and ignored if supplied — an
+  agent cannot backdate a note or claim it didn't write one.
+- **Errors tell the agent what to do next**, including the folder convention:
+  writing `vault_type: porject` into `03 🛠 Projects/` gets *"did you mean
+  'project'? — you are writing to '03 🛠 Projects', which holds vault_type:
+  project"*.
+
+`SCHEMA_MODE=strict|warn|off`. A vault with no `METADATA.md` schema block
+degrades to `off` on its own, so miradian works fine on a vault that has never
+heard of any of this.
 
 ## Design notes
 
@@ -125,6 +160,7 @@ Include the port if clients use one:
 | `MARK_AI_GENERATED` | `true` | Stamp agent-written notes. Set `false` to opt out |
 | `AI_GENERATED_FIELD` | `ai_generated` | Frontmatter key used for that stamp |
 | `STAMP_DATE` | `true` | Add `date:` to new notes. Set `false` to opt out |
+| `SCHEMA_MODE` | `strict` | `strict` refuses invalid writes, `warn` allows + reports, `off` disables |
 | `MCP_PATH` / `SSE_PATH` | `/mcp` / `/sse` | |
 | `BOUND_IP` | `127.0.0.1` | Host address the port is published on. Use a private/VPN interface. Never `0.0.0.0` |
 | `PORT` | `27125` | Host port |

@@ -264,6 +264,7 @@ class Vault:
         self._stems: dict[str, list[str]] = {}
         self._aliases: dict[str, list[str]] = {}
         self._unresolved: dict[str, set[str]] = {}
+        self._tag_counts: dict[str, int] = {}
 
     # --- paths -------------------------------------------------------------
 
@@ -346,10 +347,16 @@ class Vault:
 
     def _reindex(self) -> None:
         self._stems, self._aliases = {}, {}
+        self._tag_counts = {}
         for rel, note in self._notes.items():
             self._stems.setdefault(note.stem.lower(), []).append(rel)
             for a in note.aliases:
                 self._aliases.setdefault(a.lower(), []).append(rel)
+            # Counted here, alongside the backlinks, rather than on every
+            # vault_list_tags call: _reindex only runs when a note changed.
+            for t in note.tags:
+                key = t.strip().lower()
+                self._tag_counts[key] = self._tag_counts.get(key, 0) + 1
 
         self._backlinks = {rel: set() for rel in self._notes}
         self._unresolved = {}
@@ -408,6 +415,12 @@ class Vault:
         with self._lock:
             self._ensure()
             return dict(self._notes)  # snapshot: caller must not see later mutations
+
+    def tag_counts(self) -> dict[str, int]:
+        """How often each tag is used. Computed during reindex, not per call."""
+        with self._lock:
+            self._ensure()
+            return dict(self._tag_counts)
 
     def get(self, rel: str) -> Note:
         """Fetch a note by path or by name, with a useful error when it's missing."""

@@ -19,6 +19,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 from ruamel.yaml.comments import CommentedMap
 
+import schema as schema_mod
 from vault import Vault, VaultError, join_frontmatter
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -48,6 +49,11 @@ MARK_AI_GENERATED = os.getenv("MARK_AI_GENERATED", "true").lower() != "false"
 AI_GENERATED_FIELD = os.getenv("AI_GENERATED_FIELD", "ai_generated")
 STAMP_DATE = os.getenv("STAMP_DATE", "true").lower() != "false"
 
+# strict: refuse writes that break the schema. warn: write, but report.
+# off: no schema at all. A vault with no schema note degrades to off on its own,
+# so miradian still works on a vault that has never heard of any of this.
+SCHEMA_MODE = os.getenv("SCHEMA_MODE", "strict").lower()
+
 DEFAULT_LIMIT = 25
 
 vault = Vault(VAULT_PATH)
@@ -76,6 +82,20 @@ def _page(items: list, limit: int, offset: int) -> tuple[list, dict]:
 
 def _render(payload: dict, fmt: Format, markdown: str) -> str:
     return json.dumps(payload, indent=2, default=str, ensure_ascii=False) if fmt == "json" else markdown
+
+
+def _schema():
+    """The vault's schema, or None if it has no schema note (or mode is off).
+
+    Re-read per call rather than cached: the schema lives in the vault, so editing
+    it in Obsidian -- or registering a tag -- must take effect immediately.
+    """
+    if SCHEMA_MODE == "off":
+        return None
+    try:
+        return schema_mod.load(vault)
+    except Exception:
+        return None
 
 
 def _pagination_footer(meta: dict) -> str:
@@ -221,6 +241,149 @@ def vault_search(
 
 
 # ---------------------------------------------------------------------------
+# Schema tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+def vault_get_schema(response_format: Format = "markdown") -> str:
+    """The frontmatter schema this vault enforces: fields, allowed values, folders.
+
+    Call this before writing a note. Writes that break the schema are refused, and
+    the schema is the vault's own, not a fixed one — it can differ per vault.
+    """
+    sch = _schema()
+    if not sch:
+        return (
+            "This vault has no frontmatter schema, so writes are not validated. "
+            "Frontmatter is still read and searchable."
+        )
+
+    payload = {
+        "auto_injected": sch.auto,
+        "required": sch.required,
+        "optional": sch.optional,
+        "enums": sch.enums,
+        "open_fields": sch.open,
+        "constraints": sch.constraints,
+        "folders": sch.folders,
+        "registered_tags": len(sch.tags),
+    }
+
+    md = ["## Frontmatter schema\n"]
+    if sch.auto:
+        md.append(
+            "**Injected by the server — do not supply these:** "
+            + ", ".join(f"`{k}` ({v})" for k, v in sch.auto.items())
+        )
+    md.append("**Required:** " + ", ".join(f"`{k}`" for k in sch.required))
+    if sch.optional:
+        md.append("**Optional:** " + ", ".join(f"`{k}`" for k in sch.optional))
+    md.append("")
+    for fname, allowed in sch.enums.items():
+        md.append(f"**`{fname}`** must be one of: {', '.join(f'`{a}`' for a in allowed)}")
+    for fname, rules in sch.constraints.items():
+        if (rules or {}).get("max_length"):
+            md.append(f"**`{fname}`** max length: {rules['max_length']} characters")
+    if sch.tags:
+        md.append(
+            f"\n**`tags`** must already be registered ({len(sch.tags)} exist). "
+            "Browse with `vault_list_tags`; register a genuinely new one with `vault_create_tag`."
+        )
+    if sch.folders:
+        md.append("\n**Folder conventions:**\n")
+        md += [f"- `{folder}` → `{vt}`" for folder, vt in sch.folders.items()]
+    md.append("\n_Values in the controlled fields are lowercased automatically._")
+
+    return _render(payload, response_format, "\n".join(md))
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+def vault_list_tags(
+    similar_to: Annotated[str | None, Field(description="Rank tags by similarity to this string. Use it to find the existing tag you meant before inventing a new one.")] = None,
+    limit: Annotated[int, Field(ge=1, le=200)] = 50,
+    offset: Annotated[int, Field(ge=0)] = 0,
+    response_format: Format = "markdown",
+) -> str:
+    """List the vault's registered tags with how often each is used.
+
+    Always check here before introducing a new tag: near-duplicates
+    (`machine-learning` vs `machinelearning`) split the index and make both
+    useless for finding anything.
+    """
+    sch = _schema()
+    counts = vault.tag_counts()          # cached in the index, not recomputed here
+    registry = sch.tags if sch else sorted(counts)
+
+    if similar_to:
+        ranked = schema_mod.difflib.get_close_matches(similar_to.lower(), registry, n=limit, cutoff=0.3)
+        items = [{"tag": t, "uses": counts.get(t, 0)} for t in ranked]
+        meta = {"total": len(items), "count": len(items), "offset": 0, "has_more": False, "next_offset": None}
+        if not items:
+            return (
+                f"No registered tag resembles {similar_to!r}. If it is genuinely new, "
+                f"call vault_create_tag({similar_to.lower()!r}) to register it."
+            )
+    else:
+        ordered = sorted(registry, key=lambda t: (-counts.get(t, 0), t))
+        window, meta = _page(ordered, limit, offset)
+        items = [{"tag": t, "uses": counts.get(t, 0)} for t in window]
+
+    md = f"**{meta['total']} registered tags**\n\n" + "\n".join(
+        f"- `{i['tag']}` — {i['uses']} use(s)" for i in items
+    )
+    return _render({"tags": items, **meta}, response_format, md + _pagination_footer(meta))
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+def vault_create_tag(
+    tag: Annotated[str, Field(description="The new tag, lowercase kebab-case, e.g. 'machine-learning'.")],
+    force: Annotated[bool, Field(description="Register even though a similar tag already exists. Only after checking vault_list_tags and concluding the existing one means something different.")] = False,
+) -> str:
+    """Register a genuinely new tag in the vault's schema.
+
+    Deliberately a separate step from writing a note: a tag that appears because
+    of a typo is indistinguishable from one that appears on purpose, and the first
+    kind quietly destroys the index. Check vault_list_tags first — reuse beats
+    invention nearly every time.
+    """
+    sch = _schema()
+    if not sch:
+        return "Error: this vault has no schema note, so there is no tag registry to add to."
+
+    tag = tag.strip().lower()
+
+    problem = schema_mod.suggest_tag_name(tag)
+    if problem:
+        return f"Error: {problem}"
+
+    if sch.known_tag(tag):
+        return f"`{tag}` is already registered. Use it directly."
+
+    close = sch.close_tags(tag)
+    if close and not force:
+        return (
+            f"Error: {tag!r} closely resembles existing tag(s): {', '.join(repr(c) for c in close)}.\n"
+            "Reuse one of those if it means the same thing — near-duplicate tags split the index "
+            "and make both halves useless.\n"
+            f"If {tag!r} genuinely means something different, call vault_create_tag({tag!r}, force=true)."
+        )
+
+    try:
+        note = vault.get(schema_mod.SCHEMA_NOTE)
+        block = note.frontmatter.get("schema")
+        tags = block.setdefault("tags", [])
+        tags.append(tag)
+        # Keep the registry sorted so its diffs stay readable in git.
+        block["tags"] = sorted({str(t).strip().lower() for t in tags})
+        vault.write_atomic(note.rel, join_frontmatter(note.frontmatter, note.body))
+    except (VaultError, OSError, AttributeError) as e:
+        return f"Error: could not register the tag ({e})."
+
+    return f"Registered `{tag}`. It can now be used in note frontmatter."
+
+
+# ---------------------------------------------------------------------------
 # Graph tools
 # ---------------------------------------------------------------------------
 
@@ -343,10 +506,31 @@ def vault_write_note(
     out = CommentedMap()
     for k, v in (frontmatter or {}).items():
         out[k] = v
+
+    # Server-injected, never taken from the caller: a model should not be able to
+    # backdate a note or claim it wrote nothing.
+    out.pop("date", None)
     if STAMP_DATE:
-        out.setdefault("date", date.today().isoformat())
+        out["date"] = date.today().isoformat()
     if MARK_AI_GENERATED:
         out[AI_GENERATED_FIELD] = True
+
+    sch = _schema()
+    if sch:
+        schema_mod.normalize(out, sch)
+        errors = schema_mod.validate(out, path, sch)
+        if errors and SCHEMA_MODE == "strict":
+            return "Error: frontmatter does not match the vault schema.\n\n" + "\n".join(
+                f"- {e}" for e in errors
+            )
+        if errors:
+            warning = "\n\nWarning: frontmatter does not match the vault schema:\n" + "\n".join(
+                f"- {e}" for e in errors
+            )
+        else:
+            warning = ""
+    else:
+        warning = ""
 
     try:
         rel = vault.write_atomic(path, join_frontmatter(out, content))
@@ -355,7 +539,7 @@ def vault_write_note(
     except OSError as e:
         return f"Error: could not write `{path}` ({e})."
 
-    return f"{'Overwrote' if exists else 'Created'} `{rel}`."
+    return f"{'Overwrote' if exists else 'Created'} `{rel}`." + warning
 
 
 @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False})
@@ -416,6 +600,17 @@ def vault_update_frontmatter(
     missing = [k for k in (unset_fields or []) if k not in fm]
     for k in unset_fields or []:
         fm.pop(k, None)
+
+    # Same gate as vault_write_note. Without it this tool is a way round the
+    # schema: set status to anything, or unset a required field.
+    sch = _schema()
+    if sch:
+        schema_mod.normalize(fm, sch)
+        errors = schema_mod.validate(fm, note.rel, sch)
+        if errors and SCHEMA_MODE == "strict":
+            return "Error: that change would break the vault schema.\n\n" + "\n".join(
+                f"- {e}" for e in errors
+            )
 
     try:
         vault.write_atomic(note.rel, join_frontmatter(fm, note.body))
