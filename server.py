@@ -476,9 +476,11 @@ if not NO_AUTH:
     oauth_app = auth.asgi_app()
     for r in reversed(oauth_app.routes):
         app.router.routes.insert(0, r)
-    app.state._state.update(oauth_app.state._state)
 
     app.add_middleware(OAuthMiddleware, provider=auth)
+
+    for _key, _value in vars(oauth_app.state)["_state"].items():
+        setattr(app.state, _key, _value)
 
 # Both transports carry their own lifespan (session managers); run both.
 _http_lifespan = app.router.lifespan_context
