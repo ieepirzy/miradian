@@ -43,7 +43,9 @@ returning `has_more`/`next_offset`), and all take `response_format=markdown|json
 |---|---|
 | `vault_get_schema` | The frontmatter schema this vault enforces |
 | `vault_list_tags` | Registered tags with usage counts; `similar_to` finds the one you meant |
-| `vault_create_tag` | Deliberately register a genuinely new tag |
+| `vault_create_tag` | Register a genuinely new tag — **needs human approval** |
+| `vault_create_folder` | Create a folder and map it to a vault_type — **needs human approval** |
+| `vault_update_schema` | Add an allowed value to a controlled vocabulary — **needs human approval** |
 
 **Graph**
 | Tool | Purpose |
@@ -85,6 +87,22 @@ So miradian enforces a schema **defined by the vault itself**, in `METADATA.md`:
   writing `vault_type: porject` into `03 🛠 Projects/` gets *"did you mean
   'project'? — you are writing to '03 🛠 Projects', which holds vault_type:
   project"*.
+
+### Widening the vocabulary needs a human
+
+Every new tag, folder, or enum value is permanent, and a vocabulary that grows by
+accident is exactly the drift the schema exists to prevent. So the three tools
+that widen it are gated behind [MCP elicitation](https://modelcontextprotocol.io/specification/2025-06-18/client/elicitation):
+the server asks the human to approve, and only then writes.
+
+This **fails closed**. A client with no human attached — an autonomous agent, a
+cron run — cannot support elicitation, so the request errors and the change is
+refused. An unattended agent can read, search, and write notes; it cannot change
+what the schema permits.
+
+That boundary is enforced server-side, not delegated. Tool annotations like
+`destructiveHint` are only *hints* — the client decides what to do with them, so
+they are not a security boundary. Elicitation is.
 
 `SCHEMA_MODE=strict|warn|off`. A vault with no `METADATA.md` schema block
 degrades to `off` on its own, so miradian works fine on a vault that has never

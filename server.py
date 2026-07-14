@@ -11,11 +11,15 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import date
 from typing import Annotated, Any, Literal
 
 import uvicorn
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.elicitation import AcceptedElicitation, DeclinedElicitation
+from mcp.shared.exceptions import McpError
 from pydantic import Field
 from ruamel.yaml.comments import CommentedMap
 
@@ -335,17 +339,87 @@ def vault_list_tags(
     return _render({"tags": items, **meta}, response_format, md + _pagination_footer(meta))
 
 
+@dataclass
+class SchemaChangeApproval:
+    """What the human is asked to confirm before the vocabulary is widened."""
+
+    approve: bool
+
+
+async def _require_approval(ctx: Context, action: str) -> str | None:
+    """Ask the human to approve a schema change. Returns an error string if not approved.
+
+    Widening the vocabulary is the one thing an agent must not do on its own: every
+    new tag, folder or enum value is permanent, and a vocabulary that grows by
+    accident is exactly the drift the schema exists to prevent.
+
+    This uses MCP elicitation (spec 2025-06-18), which fails closed. A client with
+    no human attached -- an autonomous agent, a cron run -- cannot support
+    elicitation, so the request errors and the change is refused. That is the
+    desired outcome, and it is enforced here rather than trusted to the client:
+    tool annotations like destructiveHint are hints, not a boundary.
+
+    The response_type is explicit rather than None: an empty elicitation schema is
+    ambiguous under the spec, and some clients render it as a form with no controls
+    -- an approval prompt nobody can approve.
+    """
+    try:
+        result = await ctx.elicit(
+            f"miradian wants to change the vault schema:\n\n{action}\n\n"
+            "This permanently widens the vault's controlled vocabulary. Approve?",
+            response_type=SchemaChangeApproval,
+        )
+    except (McpError, ToolError) as e:
+        # The client has no human to ask. Refuse -- the whole point of the gate.
+        logger.info("schema change refused, no elicitation support: %s", e)
+        return (
+            f"Error: {action} requires human approval, and this client cannot ask for it "
+            "(no elicitation support). Schema changes are refused for unattended agents. "
+            "Ask a human to make this change, or reuse an existing value."
+        )
+    except Exception:
+        # A bug here (a bad response_type, say) must not masquerade as "the human
+        # said no" -- that would silently disable the gate rather than fail loudly.
+        logger.exception("elicitation failed unexpectedly")
+        raise
+
+    if isinstance(result, AcceptedElicitation):
+        if getattr(result.data, "approve", False):
+            return None
+        return "Declined: the human did not approve. Reuse an existing value instead."
+    if isinstance(result, DeclinedElicitation):
+        return "Declined: the human refused this change. Reuse an existing value instead."
+    return "Cancelled: no approval was given, so nothing was changed."
+
+
+def _append_to_schema(key: str, value, dedupe: bool = True) -> str | None:
+    """Add a value to a list inside the schema note. Returns an error, or None."""
+    try:
+        note = vault.get(schema_mod.SCHEMA_NOTE)
+        block = note.frontmatter.get("schema")
+        current = block.setdefault(key, [])
+        current.append(value)
+        if dedupe:
+            # Sorted so the registry's diffs stay readable in git.
+            block[key] = sorted({str(v).strip() for v in current})
+        vault.write_atomic(note.rel, join_frontmatter(note.frontmatter, note.body))
+    except (VaultError, OSError, AttributeError) as e:
+        return f"Error: could not update the schema ({e})."
+    return None
+
+
 @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
-def vault_create_tag(
+async def vault_create_tag(
+    ctx: Context,
     tag: Annotated[str, Field(description="The new tag, lowercase kebab-case, e.g. 'machine-learning'.")],
     force: Annotated[bool, Field(description="Register even though a similar tag already exists. Only after checking vault_list_tags and concluding the existing one means something different.")] = False,
 ) -> str:
-    """Register a genuinely new tag in the vault's schema.
+    """Register a genuinely new tag. Requires human approval.
 
-    Deliberately a separate step from writing a note: a tag that appears because
-    of a typo is indistinguishable from one that appears on purpose, and the first
-    kind quietly destroys the index. Check vault_list_tags first — reuse beats
-    invention nearly every time.
+    Deliberately separate from writing a note: a tag that appears because of a typo
+    is indistinguishable from one that appears on purpose, and the first kind
+    quietly destroys the index. Check vault_list_tags first — reuse beats invention
+    nearly every time.
     """
     sch = _schema()
     if not sch:
@@ -369,18 +443,113 @@ def vault_create_tag(
             f"If {tag!r} genuinely means something different, call vault_create_tag({tag!r}, force=true)."
         )
 
+    refused = await _require_approval(ctx, f"register a new tag: {tag!r}")
+    if refused:
+        return refused
+
+    if err := _append_to_schema("tags", tag):
+        return err
+    return f"Registered `{tag}`. It can now be used in note frontmatter."
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
+async def vault_create_folder(
+    ctx: Context,
+    folder: Annotated[str, Field(description="Vault-relative folder, e.g. '06 🔬 Research'.")],
+    vault_type: Annotated[str, Field(description="The vault_type notes in this folder carry. Must be an allowed vault_type, or register it first with vault_update_schema.")],
+) -> str:
+    """Create a folder and record what vault_type it holds. Requires human approval.
+
+    The folder→vault_type mapping is what lets a bad vault_type be corrected from
+    the path ("you are writing to '03 🛠 Projects', which holds vault_type:
+    project"), so a folder without one is a folder the schema cannot help with.
+    """
+    sch = _schema()
+    if not sch:
+        return "Error: this vault has no schema note."
+
+    vault_type = vault_type.strip().lower()
+    allowed = sch.enums.get("vault_type", [])
+    if allowed and vault_type not in allowed:
+        return (
+            f"Error: vault_type {vault_type!r} is not allowed. Allowed: {', '.join(allowed)}. "
+            "Add it first with vault_update_schema, then create the folder."
+        )
+
+    try:
+        target = vault.resolve_path(folder.rstrip("/") + "/.keep")
+    except VaultError as e:
+        return f"Error: {e}"
+
+    if target.parent.is_dir() and folder in sch.folders:
+        return f"`{folder}` already exists and is mapped to vault_type: {sch.folders[folder]!r}."
+
+    refused = await _require_approval(
+        ctx, f"create folder {folder!r}, holding vault_type: {vault_type!r}"
+    )
+    if refused:
+        return refused
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        note = vault.get(schema_mod.SCHEMA_NOTE)
+        block = note.frontmatter.get("schema")
+        block.setdefault("folders", {})[folder] = vault_type
+        vault.write_atomic(note.rel, join_frontmatter(note.frontmatter, note.body))
+    except (VaultError, OSError, AttributeError) as e:
+        return f"Error: could not create the folder ({e})."
+
+    # Git does not track empty directories, and Obsidian shows them fine, so the
+    # folder only becomes real once a note lands in it.
+    return (
+        f"Created `{folder}`, mapped to vault_type: `{vault_type}`. "
+        "It is empty — write a note into it to make it stick."
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False})
+async def vault_update_schema(
+    ctx: Context,
+    field: Annotated[str, Field(description="The controlled field to extend, e.g. 'vault_type' or 'status'.")],
+    value: Annotated[str, Field(description="The new allowed value to add.")],
+) -> str:
+    """Add an allowed value to a controlled vocabulary. Requires human approval.
+
+    Use sparingly. The whole worth of `status` and `vault_type` is that they are
+    short, closed lists — a vocabulary that grows whenever something doesn't fit is
+    just a free-text field with extra steps.
+    """
+    sch = _schema()
+    if not sch:
+        return "Error: this vault has no schema note."
+
+    field, value = field.strip(), value.strip().lower()
+
+    if field not in sch.enums:
+        return (
+            f"Error: {field!r} is not a controlled vocabulary. "
+            f"Controlled fields: {', '.join(sch.enums)}."
+        )
+    if value in sch.enums[field]:
+        return f"`{value}` is already an allowed {field}."
+
+    refused = await _require_approval(
+        ctx,
+        f"add {value!r} to the allowed values for {field!r} "
+        f"(currently: {', '.join(sch.enums[field])})",
+    )
+    if refused:
+        return refused
+
     try:
         note = vault.get(schema_mod.SCHEMA_NOTE)
         block = note.frontmatter.get("schema")
-        tags = block.setdefault("tags", [])
-        tags.append(tag)
-        # Keep the registry sorted so its diffs stay readable in git.
-        block["tags"] = sorted({str(t).strip().lower() for t in tags})
+        block["enums"][field].append(value)
         vault.write_atomic(note.rel, join_frontmatter(note.frontmatter, note.body))
-    except (VaultError, OSError, AttributeError) as e:
-        return f"Error: could not register the tag ({e})."
+    except (VaultError, OSError, AttributeError, KeyError) as e:
+        return f"Error: could not update the schema ({e})."
 
-    return f"Registered `{tag}`. It can now be used in note frontmatter."
+    return f"`{value}` is now an allowed `{field}`."
 
 
 # ---------------------------------------------------------------------------
