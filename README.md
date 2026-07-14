@@ -70,6 +70,9 @@ shallowest match when a name is ambiguous.
 - **Path containment:** absolute paths and `..` traversal are rejected.
 - The index is in-memory and rebuilt lazily from mtimes. A 250-note vault indexes
   in ~200 ms; there is no database to keep in sync.
+- **Thread-safe.** FastMCP runs sync tools in a thread pool and agents issue tool
+  calls in parallel, so the index is guarded by a reentrant lock. Without it, one
+  call rebuilding the index while another reads it crashes the reader.
 
 ## Endpoints
 

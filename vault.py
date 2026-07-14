@@ -11,8 +11,9 @@ import io
 import os
 import re
 import shutil
+import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ruamel.yaml import YAML
@@ -240,18 +241,28 @@ def parse_links(body: str) -> list[Link]:
 
 
 class Vault:
-    """An indexed view of the vault. Rebuilt lazily from mtimes on each access."""
+    """An indexed view of the vault. Rebuilt lazily from mtimes on each access.
+
+    Thread-safe. FastMCP runs sync tool functions in a thread pool and agents
+    fire tool calls in parallel, so two calls can land here at once. Since every
+    public method re-indexes, one thread could otherwise mutate `_notes` while
+    another iterates it ("dictionary changed size during iteration") or read a
+    half-rebuilt `_backlinks`. A reentrant lock held for the whole of each public
+    method serialises that. It is reentrant because the public methods call each
+    other (backlinks -> get -> _ensure), and it costs nothing we weren't already
+    paying: the index is rebuilt per call regardless.
+    """
 
     def __init__(self, root: str | Path):
         self.root = Path(root).resolve()
         if not self.root.is_dir():
             raise VaultError(f"Vault path is not a directory: {self.root}")
+        self._lock = threading.RLock()
         self._notes: dict[str, Note] = {}
         self._backlinks: dict[str, set[str]] = {}
         self._stems: dict[str, list[str]] = {}
         self._aliases: dict[str, list[str]] = {}
         self._unresolved: dict[str, set[str]] = {}
-        self._indexed = False
 
     # --- paths -------------------------------------------------------------
 
@@ -291,35 +302,35 @@ class Vault:
 
     def refresh(self) -> None:
         """Re-stat the vault and re-parse only notes whose mtime or size changed."""
-        seen: set[str] = set()
-        for full in self.root.rglob("*.md"):
-            if not full.is_file() or self._is_ignored(full):
-                continue
-            rel = self._rel(full)
-            seen.add(rel)
-            st = full.stat()
-            cached = self._notes.get(rel)
-            if cached and cached.mtime == st.st_mtime and cached.size == st.st_size:
-                continue
-            try:
-                text = full.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            fm, body = split_frontmatter(text)
-            self._notes[rel] = Note(
-                rel=rel,
-                frontmatter=fm,
-                body=body,
-                links=parse_links(body) + _frontmatter_links(fm),
-                mtime=st.st_mtime,
-                size=st.st_size,
-            )
+        with self._lock:
+            seen: set[str] = set()
+            for full in self.root.rglob("*.md"):
+                if not full.is_file() or self._is_ignored(full):
+                    continue
+                rel = self._rel(full)
+                seen.add(rel)
+                st = full.stat()
+                cached = self._notes.get(rel)
+                if cached and cached.mtime == st.st_mtime and cached.size == st.st_size:
+                    continue
+                try:
+                    text = full.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                fm, body = split_frontmatter(text)
+                self._notes[rel] = Note(
+                    rel=rel,
+                    frontmatter=fm,
+                    body=body,
+                    links=parse_links(body) + _frontmatter_links(fm),
+                    mtime=st.st_mtime,
+                    size=st.st_size,
+                )
 
-        for gone in set(self._notes) - seen:
-            del self._notes[gone]
+            for gone in set(self._notes) - seen:
+                del self._notes[gone]
 
-        self._reindex()
-        self._indexed = True
+            self._reindex()
 
     def _reindex(self) -> None:
         self._stems, self._aliases = {}, {}
@@ -332,7 +343,7 @@ class Vault:
         self._unresolved = {}
         for rel, note in self._notes.items():
             for link in note.links:
-                target = self.resolve_link(link.target)
+                target = self._resolve_link_locked(link.target)
                 if target:
                     self._backlinks[target].add(rel)
                 else:
@@ -341,7 +352,7 @@ class Vault:
     def _ensure(self) -> None:
         self.refresh()
 
-    def resolve_link(self, target: str) -> str | None:
+    def _resolve_link_locked(self, target: str) -> str | None:
         """Resolve a wikilink target to a note path, the way Obsidian does.
 
         Obsidian matches by name, not full path, so `[[Kanerva]]` finds the note
@@ -370,60 +381,73 @@ class Vault:
         return None
 
     # --- reads -------------------------------------------------------------
+    #
+    # Each public method holds the lock for its whole body, not just across
+    # _ensure(). Releasing after _ensure() would let a concurrent refresh()
+    # rebuild the dicts while this call is still reading them.
+
+    def resolve_link(self, target: str) -> str | None:
+        """Resolve a wikilink target against the current index."""
+        with self._lock:
+            self._ensure()
+            return self._resolve_link_locked(target)
 
     def notes(self) -> dict[str, Note]:
-        self._ensure()
-        return self._notes
+        with self._lock:
+            self._ensure()
+            return dict(self._notes)  # snapshot: caller must not see later mutations
 
     def get(self, rel: str) -> Note:
         """Fetch a note by path or by name, with a useful error when it's missing."""
-        self._ensure()
-        key = rel.strip().lstrip("/")
-        if not key.endswith(".md"):
-            key_md = f"{key}.md"
-        else:
-            key_md = key
-        if key_md in self._notes:
-            return self._notes[key_md]
+        with self._lock:
+            self._ensure()
+            key = rel.strip().lstrip("/")
+            key_md = key if key.endswith(".md") else f"{key}.md"
+            if key_md in self._notes:
+                return self._notes[key_md]
 
-        resolved = self.resolve_link(key)
-        if resolved:
-            return self._notes[resolved]
+            resolved = self._resolve_link_locked(key)
+            if resolved:
+                return self._notes[resolved]
 
-        raise VaultError(_not_found_message(key, list(self._notes)))
+            raise VaultError(_not_found_message(key, list(self._notes)))
 
     def backlinks(self, rel: str) -> list[str]:
-        note = self.get(rel)
-        return sorted(self._backlinks.get(note.rel, set()))
+        with self._lock:
+            note = self.get(rel)
+            return sorted(self._backlinks.get(note.rel, set()))
 
     def unresolved(self, rel: str) -> list[str]:
-        note = self.get(rel)
-        return sorted(self._unresolved.get(note.rel, set()))
+        with self._lock:
+            note = self.get(rel)
+            return sorted(self._unresolved.get(note.rel, set()))
 
     def outgoing(self, rel: str) -> list[tuple[Link, str | None]]:
         """Outgoing links paired with the note each resolves to (None if unresolved)."""
-        note = self.get(rel)
-        return [(link, self.resolve_link(link.target)) for link in note.links]
+        with self._lock:
+            note = self.get(rel)
+            return [(link, self._resolve_link_locked(link.target)) for link in note.links]
 
     def neighborhood(self, rel: str, depth: int = 1) -> dict[str, int]:
         """Notes within `depth` hops, following links in either direction."""
-        note = self.get(rel)
-        seen = {note.rel: 0}
-        frontier = [note.rel]
-        for d in range(1, depth + 1):
-            nxt = []
-            for cur in frontier:
-                outs = {r for _, r in self.outgoing(cur) if r}
-                ins = self._backlinks.get(cur, set())
-                for n in outs | ins:
-                    if n not in seen:
-                        seen[n] = d
-                        nxt.append(n)
-            frontier = nxt
-            if not frontier:
-                break
-        del seen[note.rel]
-        return seen
+        with self._lock:
+            note = self.get(rel)
+            seen = {note.rel: 0}
+            frontier = [note.rel]
+            for d in range(1, depth + 1):
+                nxt = []
+                for cur in frontier:
+                    outs = {r for _, r in self.outgoing(cur) if r}
+                    ins = self._backlinks.get(cur, set())
+                    for n in outs | ins:
+                        if n not in seen:
+                            seen[n] = d
+                            nxt.append(n)
+                frontier = nxt
+                if not frontier:
+                    break
+            del seen[note.rel]
+            return seen
 
     # --- search ------------------------------------------------------------
 
@@ -444,8 +468,6 @@ class Vault:
         skipped -- they are megabytes of embedded JSON and would swamp results --
         but their frontmatter still matches.
         """
-        self._ensure()
-
         pattern = None
         if query:
             pattern = re.compile(
@@ -453,9 +475,11 @@ class Vault:
                 0 if case_sensitive else re.IGNORECASE,
             )
 
+        notes = self.notes()  # locked snapshot; safe to iterate without the lock
+
         results: list[dict] = []
-        for rel in sorted(self._notes):
-            note = self._notes[rel]
+        for rel in sorted(notes):
+            note = notes[rel]
 
             if path_glob and not PurePosixPath(rel).match(path_glob):
                 continue
@@ -507,23 +531,26 @@ class Vault:
         ever observe the old or the new file -- never a half-written one. A plain
         open(w) here would be the single most likely source of sync conflicts.
         """
-        full = self.resolve_path(rel)
-        if full.suffix != ".md":
-            raise VaultError(f"Only .md notes can be written; got {full.name!r}.")
-        full.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            full = self.resolve_path(rel)
+            if full.suffix != ".md":
+                raise VaultError(f"Only .md notes can be written; got {full.name!r}.")
+            full.parent.mkdir(parents=True, exist_ok=True)
 
-        tmp = full.parent / f".{full.name}.miradian.tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(text)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, full)
-        finally:
-            tmp.unlink(missing_ok=True)
+            # A per-thread temp name: two concurrent writes to the same note must
+            # not stomp on each other's staging file.
+            tmp = full.parent / f".{full.name}.{os.getpid()}.{threading.get_ident()}.miradian.tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, full)
+            finally:
+                tmp.unlink(missing_ok=True)
 
-        self.refresh()
-        return self._rel(full)
+            self.refresh()
+            return self._rel(full)
 
     def trash(self, rel: str) -> str:
         """Move a note to .trash/ instead of unlinking it.
@@ -531,15 +558,16 @@ class Vault:
         .trash is in the vault's .stignore, so the deletion still propagates to
         other machines while a recovery copy stays on this one.
         """
-        note = self.get(rel)
-        full = self.resolve_path(note.rel)
-        dest = self.root / TRASH_DIR / note.rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists():
-            dest = dest.with_name(f"{dest.stem}.{int(time.time())}{dest.suffix}")
-        shutil.move(str(full), str(dest))
-        self.refresh()
-        return dest.relative_to(self.root).as_posix()
+        with self._lock:
+            note = self.get(rel)
+            full = self.resolve_path(note.rel)
+            dest = self.root / TRASH_DIR / note.rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                dest = dest.with_name(f"{dest.stem}.{int(time.time())}{dest.suffix}")
+            shutil.move(str(full), str(dest))
+            self.refresh()
+            return dest.relative_to(self.root).as_posix()
 
 
 def _fm_matches(fm: CommentedMap, wanted: dict) -> bool:

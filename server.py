@@ -305,7 +305,10 @@ def vault_get_neighborhood(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False})
+# destructiveHint is True because mode="overwrite" replaces an existing note
+# wholesale. A client using annotations to decide what to auto-approve must not
+# wave that through.
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "openWorldHint": False})
 def vault_write_note(
     path: Annotated[str, Field(description="Vault-relative path ending in .md, e.g. '00 📥 Inbox/idea.md'.")],
     content: Annotated[str, Field(description="Markdown body, without frontmatter.")],

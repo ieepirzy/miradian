@@ -12,6 +12,9 @@ vault, and are the reason this file exists:
 
 from __future__ import annotations
 
+import sys
+import threading
+
 import pytest
 
 from vault import Vault, VaultError, join_frontmatter, parse_links, split_frontmatter
@@ -252,3 +255,61 @@ def test_excalidraw_body_excluded_from_search_but_kept_in_graph(tmp_path):
 def test_index_picks_up_external_changes(vault):
     (vault.root / f"{INBOX}/Later.md").write_text("# Later\n\n[[Tensor]]\n", encoding="utf-8")
     assert f"{INBOX}/Later.md" in vault.backlinks("Tensor")
+
+
+# --- concurrency ------------------------------------------------------------
+
+
+def test_concurrent_reads_and_writes_do_not_corrupt_the_index(vault):
+    """FastMCP runs sync tools in a thread pool and agents call tools in parallel.
+
+    Without the lock, a thread rebuilding the index mutates `_notes` while another
+    iterates it in `_reindex`, raising "dictionary changed size during iteration".
+
+    The index must be big enough that a rebuild spans several GIL slices, and the
+    switch interval short enough to force preemption mid-iteration -- otherwise a
+    small vault rebuilds atomically by luck and the race hides. Verified to fail
+    against the unlocked implementation.
+    """
+    for i in range(150):
+        (vault.root / f"{KNOWLEDGE}/Bulk {i}.md").write_text(
+            f"# Bulk {i}\n\n[[Linear Algebra]] and [[Tensor]].\n", encoding="utf-8"
+        )
+    vault.refresh()
+
+    errors: list[Exception] = []
+    barrier = threading.Barrier(8)
+    original_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # force frequent thread switches
+
+    def reader() -> None:
+        barrier.wait()
+        try:
+            for _ in range(15):
+                vault.backlinks("Linear Algebra")
+                vault.search("Tensor")
+                vault.notes()
+        except Exception as e:  # noqa: BLE001 - any exception is a failure
+            errors.append(e)
+
+    def writer(n: int) -> None:
+        barrier.wait()
+        try:
+            for i in range(15):
+                vault.write_atomic(f"{INBOX}/Concurrent {n}-{i}.md", f"# {n}-{i}\n\n[[Tensor]]\n")
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=reader) for _ in range(4)]
+    threads += [threading.Thread(target=writer, args=(i,)) for i in range(4)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(original_interval)
+
+    assert not errors, f"concurrent access raised: {errors[:3]}"
+    assert not list(vault.root.rglob("*.miradian.tmp")), "temp files left behind"
+    assert len([r for r in vault.notes() if "Concurrent" in r]) == 60
