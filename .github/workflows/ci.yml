@@ -52,9 +52,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Run gitleaks directly rather than via gitleaks-action. On a push the
+      # action scans the range <before>^..<after>, and on the first push to a new
+      # repo <before> is the root commit -- so `root^` is an unknown revision,
+      # git aborts, and the action scans ~0 bytes and then still exits 1. Red
+      # build, zero coverage. Invoking gitleaks ourselves scans the full history
+      # (fetch-depth: 0 above), and sidesteps the action's deprecated Node 20.
+      - name: Run gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            zricethezav/gitleaks:v8.24.3 detect --source=/repo --redact -v
 
   osv-scan:
     name: OSV vulnerability scan

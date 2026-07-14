@@ -8,8 +8,10 @@ if [ ! -d "$VAULT" ]; then
   exit 1
 fi
 
-# The vault is a Syncthing replica owned by the host user. Run as that owner so
-# writes land with the uid Syncthing expects, rather than chowning the vault.
+# Run as whoever owns the vault on the host, so notes we write keep the same
+# ownership as notes you write. Adopting the directory's uid beats chowning it:
+# the vault is yours, and a sync client (Syncthing, Dropbox) or Obsidian itself
+# may be writing to it at the same time and expects its own uid back.
 VAULT_UID="$(stat -c %u "$VAULT")"
 VAULT_GID="$(stat -c %g "$VAULT")"
 

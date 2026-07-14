@@ -91,12 +91,30 @@ running in private mode with a seeded client. A single access token works agains
 both endpoints. Requires **origo >= 0.1.9** for the refresh-token grant, which
 lets access tokens stay short-lived (1h) with rotating refresh tokens (30d).
 
+### `MCP_BASE_URL`
+
+The one setting that silently breaks things when it's wrong. It is the URL clients
+**reach the server at** — not the address it binds to (that's `BOUND_IP`).
+
+origo derives everything from it: the issuer, the `/authorize` and `/token` URLs
+it advertises in discovery, and the resource identifier tokens are bound to
+(`MCP_BASE_URL` + `MCP_PATH`). The server never infers it from the incoming
+request. Get it wrong and the client is redirected somewhere it can't reach, or
+its token's resource fails to match and every call 401s.
+
+Include the port if clients use one:
+
+| Setup | `MCP_BASE_URL` |
+|---|---|
+| Behind a reverse proxy (TLS terminated there) | `https://miradian.example.com` |
+| Straight over a VPN, no proxy | `http://10.8.0.8:27125` (`BOUND_IP` + `PORT`) |
+
 ## Configuration
 
 | Variable | Default | Notes |
 |---|---|---|
 | `VAULT_PATH` | `/vault` | Vault mount inside the container |
-| `MCP_BASE_URL` | — | Externally visible base URL; OAuth metadata is derived from it |
+| `MCP_BASE_URL` | — | The URL clients **reach** this server at (not the bind address). See below |
 | `MCP_CLIENT_ID` | `miradian` | |
 | `MCP_CLIENT_SECRET` | — | **Required** unless `MCP_NO_AUTH=true` |
 | `MCP_AUTO_APPROVE` | `true` | Skip the consent page |

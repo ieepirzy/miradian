@@ -3,3 +3,9 @@ origo>=0.1.9
 ruamel.yaml>=0.18
 starlette>=0.40
 uvicorn[standard]>=0.30
+
+# Transitive (httpx, anyio), pinned only to set a security floor: idna < 3.15 is
+# vulnerable to GHSA-65pc-fj4g-8rjx. pip already resolves to a safe version, but
+# a bare ">=" range lets a resolver -- including OSV's scanner -- pick the
+# minimum, so state the floor explicitly rather than rely on luck.
+idna>=3.15
