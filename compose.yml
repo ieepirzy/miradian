@@ -27,7 +27,6 @@ services:
       MCP_PATH: ${MCP_PATH:-/mcp}
       SSE_PATH: ${SSE_PATH:-/sse}
     ports:
-      - "127.0.0.1:${PORT:-27125}:8000"
       - "${BOUND_IP:-127.0.0.1}:${PORT:-27125}:8000"
     security_opt:
       - no-new-privileges:true
