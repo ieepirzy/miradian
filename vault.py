@@ -13,6 +13,7 @@ import re
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -535,6 +536,35 @@ class Vault:
         return results
 
     # --- writes ------------------------------------------------------------
+
+    def edit(self, rel: str, transform: Callable[[Note], str]) -> str:
+        """Read-modify-write a note as one atomic operation with respect to the lock.
+
+        `vault_edit_note` and `vault_update_frontmatter` used to call `get()` and
+        `write_atomic()` as two separate lock acquisitions, with application logic
+        (a string replace, a frontmatter mutation) running lock-free in between.
+        Two concurrent calls for the same note -- two agent tool calls in flight,
+        or an agent racing a human editing in Obsidian -- could then interleave as
+        read A, read B, write A, write B: B's write is built from a stale read and
+        silently clobbers A's change with no error to either caller (a classic
+        lost update). Worse, `get()` returns the live Note held in the index, not
+        a copy, so two concurrent callers were mutating the very same
+        `CommentedMap` with no lock at all -- not just a lost update but a data
+        race on ruamel's internal bookkeeping, which can corrupt or raise
+        outright. `write_atomic`'s temp-file+rename remains atomic at the
+        filesystem level throughout, so on-disk state is never torn -- but that
+        doesn't help when the in-memory object feeding it was already corrupted.
+
+        Holding the lock for the whole read-transform-write closes that window:
+        `transform` receives the just-read Note and returns the full new file
+        text, and no other call through this Vault can observe or write that note
+        in between. The lock is reentrant, so `write_atomic`'s own acquisition
+        below is free.
+        """
+        with self._lock:
+            note = self.get(rel)
+            new_text = transform(note)
+            return self.write_atomic(note.rel, new_text)
 
     def write_atomic(self, rel: str, text: str) -> str:
         """Write a note atomically: temp file in the same dir, fsync, then rename.

@@ -137,10 +137,11 @@ docker compose up -d --build
 
 Copy `.env.example` to `.env` and fill it in.
 
-`compose.yml` publishes on loopback plus `BOUND_IP`, never `0.0.0.0`. Point
-`BOUND_IP` at a private or VPN interface (a WireGuard peer address, say) and the
-port stays unreachable from your LAN and the internet regardless of router
-configuration. It defaults to loopback.
+`compose.yml` publishes on `BOUND_IP`, never `0.0.0.0`. Point `BOUND_IP` at a
+private or VPN interface (a WireGuard peer address, say) and the port stays
+unreachable from your LAN and the internet regardless of router configuration.
+It defaults to loopback, so out of the box the server is reachable only from
+this host.
 
 The container runs as the vault directory's owning uid, so writes carry the uid
 the host expects -- which matters if the vault is a sync replica.
