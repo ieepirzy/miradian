@@ -109,6 +109,18 @@ Include the port if clients use one:
 | Behind a reverse proxy (TLS terminated there) | `https://miradian.example.com` |
 | Straight over a VPN, no proxy | `http://10.8.0.8:27125` (`BOUND_IP` + `PORT`) |
 
+### `MCP_ANY_REDIRECT_URI`
+
+By default the seeded client's `redirect_uri` is checked against an exact
+allowlist at `/authorize`, and since `miradian` doesn't set `client_redirect_uris`
+that allowlist is empty — every `redirect_uri` is rejected (origo fails closed).
+Set `MCP_ANY_REDIRECT_URI=true` to seed the client with origo's `ANY_REDIRECT_URI`
+sentinel instead, which disables exact matching for it entirely. This is meant
+for connector surfaces (ChatGPT, Grok, …) whose callback URLs are undocumented
+or churn; `MCP_CLIENT_SECRET` still gates `/token` either way, so a leaked
+authorization code alone stays unusable. See origo's README ("Redirect URIs for
+pre-registered clients") for the full trade-off before turning this on.
+
 ## Configuration
 
 | Variable | Default | Notes |
@@ -119,6 +131,7 @@ Include the port if clients use one:
 | `MCP_CLIENT_SECRET` | — | **Required** unless `MCP_NO_AUTH=true` |
 | `MCP_AUTO_APPROVE` | `true` | Skip the consent page |
 | `MCP_PUBLIC_REGISTRATION` | `false` | Keep off: private server |
+| `MCP_ANY_REDIRECT_URI` | `false` | Opt the seeded client out of exact `redirect_uri` matching at `/authorize`. See below |
 | `MCP_TOKEN_TTL` | `3600` | Access token lifetime |
 | `MCP_REFRESH_TOKEN_TTL` | `2592000` | Refresh token lifetime |
 | `MCP_NO_AUTH` | `false` | Local testing only — **never** in deployment |
