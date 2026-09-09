@@ -2,6 +2,10 @@
 set -e
 
 VAULT="${VAULT_PATH:-/vault}"
+# origo's own env var for where it persists OAuth state; unset here only
+# picks the /data default set in compose.yml -- ORIGO_STORAGE_PATH="" (forcing
+# in-memory storage) is left alone, since there's then no directory to fix.
+DATA="${ORIGO_STORAGE_PATH-/data}"
 
 if [ ! -d "$VAULT" ]; then
   echo "FATAL: vault not mounted at $VAULT" >&2
@@ -14,6 +18,15 @@ fi
 # may be writing to it at the same time and expects its own uid back.
 VAULT_UID="$(stat -c %u "$VAULT")"
 VAULT_GID="$(stat -c %g "$VAULT")"
+
+# Unlike the vault, origo's persisted OAuth state is ours alone -- nothing else
+# writes to it -- so chowning it to match is fine (and simpler). Without this,
+# a fresh Docker volume stays root-owned, the dropped-privilege process below
+# can't write to it, and origo silently falls back to in-memory storage.
+if [ -n "$DATA" ]; then
+  mkdir -p "$DATA"
+  chown "$VAULT_UID:$VAULT_GID" "$DATA" 2>/dev/null || true
+fi
 
 if [ "$VAULT_UID" = "0" ]; then
   exec python /app/server.py

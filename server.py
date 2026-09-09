@@ -35,6 +35,11 @@ CLIENT_SECRET = os.getenv("MCP_CLIENT_SECRET", "")
 AUTO_APPROVE = os.getenv("MCP_AUTO_APPROVE", "true").lower() == "true"
 PUBLIC_REGISTRATION = os.getenv("MCP_PUBLIC_REGISTRATION", "false").lower() == "true"
 NO_AUTH = os.getenv("MCP_NO_AUTH", "false").lower() == "true"
+# Opts the seeded client out of exact redirect_uri matching at /authorize (origo's
+# ANY_REDIRECT_URI sentinel). For connector surfaces with undocumented/churning
+# callback URLs. MCP_CLIENT_SECRET still gates /token either way — see origo's
+# README ("Redirect URIs for pre-registered clients") for the full trade-off.
+ALLOW_ANY_REDIRECT_URI = os.getenv("MCP_ANY_REDIRECT_URI", "false").lower() == "true"
 MCP_PATH = os.getenv("MCP_PATH", "/mcp")
 SSE_PATH = os.getenv("SSE_PATH", "/sse")
 TOKEN_TTL = int(os.getenv("MCP_TOKEN_TTL", "3600"))
@@ -474,7 +479,7 @@ for route in sse_app.routes:
     app.router.routes.append(route)
 
 if not NO_AUTH:
-    from origo import OAuthMiddleware, OAuthProvider
+    from origo import ANY_REDIRECT_URI, OAuthMiddleware, OAuthProvider
 
     if not CLIENT_SECRET:
         raise SystemExit("MCP_CLIENT_SECRET is required (or set MCP_NO_AUTH=true for local testing).")
@@ -482,6 +487,7 @@ if not NO_AUTH:
     auth = OAuthProvider(
         base_url=BASE_URL,
         clients={CLIENT_ID: CLIENT_SECRET},
+        client_redirect_uris={CLIENT_ID: ANY_REDIRECT_URI} if ALLOW_ANY_REDIRECT_URI else None,
         auto_approve=AUTO_APPROVE,
         public_registration=PUBLIC_REGISTRATION,
         token_ttl=TOKEN_TTL,

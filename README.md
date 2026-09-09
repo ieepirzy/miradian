@@ -88,8 +88,9 @@ Serves both transports from one app:
 
 Auth is [origo](https://github.com/ieepirzy/origo) in-process (OAuth 2.1 + PKCE),
 running in private mode with a seeded client. A single access token works against
-both endpoints. Requires **origo >= 0.1.9** for the refresh-token grant, which
-lets access tokens stay short-lived (1h) with rotating refresh tokens (30d).
+both endpoints. Requires **origo >= 0.3.0**, for the refresh-token grant (access
+tokens stay short-lived (1h) with rotating refresh tokens (30d)) and for
+persisting OAuth state to disk by default — see [Credential persistence](#credential-persistence).
 
 ### `MCP_BASE_URL`
 
@@ -109,6 +110,40 @@ Include the port if clients use one:
 | Behind a reverse proxy (TLS terminated there) | `https://miradian.example.com` |
 | Straight over a VPN, no proxy | `http://10.8.0.8:27125` (`BOUND_IP` + `PORT`) |
 
+### `MCP_ANY_REDIRECT_URI`
+
+By default the seeded client's `redirect_uri` is checked against an exact
+allowlist at `/authorize`, and since `miradian` doesn't set `client_redirect_uris`
+that allowlist is empty — every `redirect_uri` is rejected (origo fails closed).
+Set `MCP_ANY_REDIRECT_URI=true` to seed the client with origo's `ANY_REDIRECT_URI`
+sentinel instead, which disables exact matching for it entirely. This is meant
+for connector surfaces (ChatGPT, Grok, …) whose callback URLs are undocumented
+or churn; `MCP_CLIENT_SECRET` still gates `/token` either way, so a leaked
+authorization code alone stays unusable. See origo's README ("Redirect URIs for
+pre-registered clients") for the full trade-off before turning this on.
+
+### Credential persistence
+
+origo persists OAuth state (access tokens, refresh tokens, pending auth codes,
+and any dynamically-registered clients) to a SQLite file by default — with no
+code changes on miradian's part, since this is origo's own default as of 0.2.0.
+Without it, every restart or redeploy silently logged out every connected
+client, forcing interactive re-authorization.
+
+`compose.yml` wires this to a dedicated `miradian_data` Docker volume, mounted
+at `/data` with `ORIGO_STORAGE_PATH=/data`, so credentials survive a full
+redeploy (`docker compose up -d --build`), not just an in-container restart.
+`docker compose down -v` deletes that volume — and with it, every issued
+token and refresh token, forcing every client to re-authorize.
+
+Pre-registered clients (`MCP_CLIENT_ID`/`MCP_CLIENT_SECRET`) are never
+persisted — they're re-seeded from the environment on every boot, so rotating
+`MCP_CLIENT_SECRET` doesn't require touching the volume. To revoke everything
+without wiping the whole volume, delete the `.db` file inside it (or its rows);
+see origo's README ("Token persistence") for the full security properties
+(everything is stored hashed, never in plaintext) and how to point it
+elsewhere or opt out entirely via `ORIGO_STORAGE_PATH`.
+
 ## Configuration
 
 | Variable | Default | Notes |
@@ -119,6 +154,8 @@ Include the port if clients use one:
 | `MCP_CLIENT_SECRET` | — | **Required** unless `MCP_NO_AUTH=true` |
 | `MCP_AUTO_APPROVE` | `true` | Skip the consent page |
 | `MCP_PUBLIC_REGISTRATION` | `false` | Keep off: private server |
+| `MCP_ANY_REDIRECT_URI` | `false` | Opt the seeded client out of exact `redirect_uri` matching at `/authorize`. See below |
+| `ORIGO_STORAGE_PATH` | `/data` (via `compose.yml`) | Where origo persists OAuth state. See [Credential persistence](#credential-persistence) |
 | `MCP_TOKEN_TTL` | `3600` | Access token lifetime |
 | `MCP_REFRESH_TOKEN_TTL` | `2592000` | Refresh token lifetime |
 | `MCP_NO_AUTH` | `false` | Local testing only — **never** in deployment |
@@ -144,7 +181,9 @@ It defaults to loopback, so out of the box the server is reachable only from
 this host.
 
 The container runs as the vault directory's owning uid, so writes carry the uid
-the host expects -- which matters if the vault is a sync replica.
+the host expects -- which matters if the vault is a sync replica. The
+`miradian_data` volume (origo's persisted OAuth state) is chowned to that same
+uid on startup, so it stays writable across restarts too.
 
 ## Develop
 

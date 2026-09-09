@@ -1,11 +1,19 @@
 fastmcp>=3.0
-origo>=0.1.9
+origo>=0.3.0
 ruamel.yaml>=0.18
 starlette>=0.40
 uvicorn[standard]>=0.30
 
-# Transitive (httpx, anyio), pinned only to set a security floor: idna < 3.15 is
-# vulnerable to GHSA-65pc-fj4g-8rjx. pip already resolves to a safe version, but
-# a bare ">=" range lets a resolver -- including OSV's scanner -- pick the
-# minimum, so state the floor explicitly rather than rely on luck.
+# Transitive (httpx2, httpcore2, anyio), pinned only to set security floors: a
+# bare ">=" range on our direct deps lets a resolver -- including OSV's scanner
+# -- pick a vulnerable minimum, so state the floors explicitly rather than rely
+# on luck.
+# idna < 3.15 is vulnerable to GHSA-65pc-fj4g-8rjx.
 idna>=3.15
+# httpx2 < 2.12.0 is vulnerable to GHSA-7mj9-2mp8-4m2p, GHSA-8xx6-hgc6-gc2m,
+# GHSA-f2fp-rgf2-35cp, GHSA-h4x7-gw46-3wm6, GHSA-pf96-p4fj-6566 (pulled in by
+# fastmcp's [client]/[server] extras).
+httpx2>=2.12.0
+# httpcore2 < 2.10.0 is vulnerable to GHSA-7mj9-2mp8-4m2p (httpx2's own
+# transitive dependency).
+httpcore2>=2.10.0
