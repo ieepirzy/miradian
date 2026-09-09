@@ -1,5 +1,5 @@
 fastmcp>=3.0
-origo>=0.2.1
+origo>=0.3.0
 ruamel.yaml>=0.18
 starlette>=0.40
 uvicorn[standard]>=0.30

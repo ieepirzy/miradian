@@ -15,13 +15,19 @@ services:
     restart: unless-stopped
     volumes:
       - ${VAULT_PATH}:/vault
+      - miradian_data:/data
     environment:
       VAULT_PATH: /vault
+      # origo's own OAuth-state persistence, pointed at the miradian_data volume
+      # below so tokens/refresh tokens/pending codes survive restarts *and*
+      # redeploys, not just restarts. `docker compose down -v` deletes it.
+      ORIGO_STORAGE_PATH: /data
       MCP_BASE_URL: ${MCP_BASE_URL}
       MCP_CLIENT_ID: ${MCP_CLIENT_ID}
       MCP_CLIENT_SECRET: ${MCP_CLIENT_SECRET}
       MCP_AUTO_APPROVE: ${MCP_AUTO_APPROVE:-true}
       MCP_PUBLIC_REGISTRATION: ${MCP_PUBLIC_REGISTRATION:-false}
+      MCP_ANY_REDIRECT_URI: ${MCP_ANY_REDIRECT_URI:-false}
       MCP_TOKEN_TTL: ${MCP_TOKEN_TTL:-3600}
       MCP_REFRESH_TOKEN_TTL: ${MCP_REFRESH_TOKEN_TTL:-2592000}
       MCP_PATH: ${MCP_PATH:-/mcp}
@@ -30,3 +36,6 @@ services:
       - "${BOUND_IP:-127.0.0.1}:${PORT:-27125}:8000"
     security_opt:
       - no-new-privileges:true
+
+volumes:
+  miradian_data:
