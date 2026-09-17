@@ -129,7 +129,34 @@ closed either way, so leaving it on regresses nothing that ever worked — it ju
 leaves `vault_create_tag`, `vault_create_folder` and `vault_update_schema`
 unusable, which is the status quo.
 
-## 11. Rate of scanning
+## 11. Three writers, and no concurrency test anywhere
+
+The deployed vault has three writers on the same files: a human in Obsidian, agents
+over MCP, and MiraDesign over HTTP. Neither Miradian's suite nor MiraDesign's shared
+provider suite has a single concurrency case.
+
+What is actually true today:
+
+- Every write is atomic (temp file + `os.replace`), so no reader ever observes a
+  half-written document and Syncthing never sees a torn file.
+- `expected_version` turns a detected race into a `409`.
+
+What that does **not** give you: atomicity means nobody sees a half-written file, not
+that two writers cannot each land a complete write where the second silently discards
+the first's change. A caller that omits `expected_version` is last-writer-wins by
+construction, and the `/api/v1` surface allows omitting it.
+
+Worse, the one writer that *cannot* participate is the human: Obsidian does not know
+what `expected_version` is. A human editing a document while MiraDesign patches its
+metadata is a real lost update, and the only reason it has not happened is that
+nothing is deployed yet.
+
+Shipped: nothing. Out of scope deliberately rather than by oversight — a real answer
+is either file locking (which Syncthing complicates), a merge strategy, or accepting
+it and detecting after the fact from the change feed. Recorded so the first
+occurrence is a known unknown rather than a surprise.
+
+## 12. Rate of scanning
 
 Every poll triggers a full directory walk plus a stat per note (~30 ms at 1k notes,
 ~270 ms at 10k). At one consumer polling every few seconds this is free. It is not
