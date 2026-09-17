@@ -127,6 +127,34 @@ def create_api(
                     "The document API only addresses project documents."
                 )
 
+    def guard_blind_write(payload: dict) -> None:
+        """An update must name the version it expects, or say it means to clobber.
+
+        Making `expected_version` optional makes a blind write the accidental
+        default, and "pass it, or you get last-writer-wins" is a convention that
+        fails exactly for the caller who forgot -- who is also the caller least
+        likely to notice. Requiring one or the other means a blind write has to be
+        spelled at the call site, where a reader can see it and ask why.
+
+        `overwrite: true` is a real need, not a loophole: a consumer syncing from
+        its own source of truth genuinely does not care what is on disk. The point
+        is that it says so.
+
+        This lives at the API surface rather than in DocumentService, because the
+        service is shared with the MCP tools and their semantics are not changing.
+        """
+        if payload.get("expected_version"):
+            return
+        if payload.get("overwrite") is True:
+            return
+        raise DocumentError(
+            "This would be a blind write. Pass 'expected_version' (from the version "
+            "you read) so a racing edit is refused instead of silently discarded, or "
+            "pass 'overwrite': true to say you mean to clobber whatever is there. "
+            "The vault has other writers -- a human in Obsidian and agents over MCP -- "
+            "and neither of them can tell you they were mid-edit."
+        )
+
     def resolve_in_scope(id: str | None = None, path: str | None = None) -> str:
         """Resolve an id-or-path to an in-scope path, refusing before anything happens.
 
@@ -231,6 +259,7 @@ def create_api(
         if "body" not in p:
             raise DocumentError("'body' is required. To change metadata only, use patch-metadata.")
         rel = resolve_in_scope(p.get("id"), p.get("path"))
+        guard_blind_write(p)
         doc = service.write_document(
             path=rel,
             body=p["body"],
@@ -242,6 +271,7 @@ def create_api(
     async def patch_metadata(request: Request) -> JSONResponse:
         p = await _body(request)
         rel = resolve_in_scope(p.get("id"), p.get("path"))
+        guard_blind_write(p)
         doc, missing = service.patch_metadata(
             path=rel,
             set_fields=p.get("set"),
@@ -259,12 +289,14 @@ def create_api(
         # names an in-scope destination.
         guard_scope(p["to"])
         rel = resolve_in_scope(p.get("id"), p.get("path"))
+        guard_blind_write(p)
         doc = service.move_document(path=rel, to=p["to"], expected_version=p.get("expected_version"))
         return JSONResponse({"document": doc.as_dict()})
 
     async def delete_document(request: Request) -> JSONResponse:
         p = await _body(request)
         rel = resolve_in_scope(p.get("id"), p.get("path"))
+        guard_blind_write(p)
         result = service.delete_document(path=rel, expected_version=p.get("expected_version"))
         return JSONResponse(result)
 

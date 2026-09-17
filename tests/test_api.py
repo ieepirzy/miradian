@@ -273,7 +273,7 @@ def test_patch_metadata_leaves_the_body_alone(client):
     doc = client.get("/api/v1/documents", headers=AUTH).json()["documents"][0]
     r = client.post(
         "/api/v1/documents/patch-metadata",
-        json={"id": doc["id"], "set": {"status": "done"}, "unset": ["absent"]},
+        json={"id": doc["id"], "set": {"status": "done"}, "unset": ["absent"], "overwrite": True},
         headers=AUTH,
     )
     body = r.json()
@@ -283,10 +283,69 @@ def test_patch_metadata_leaves_the_body_alone(client):
     assert body["not_present"] == ["absent"]
 
 
+# An update must name the version it expects or declare it means to clobber.
+# "Pass expected_version or you get last-writer-wins" is a convention, and a
+# convention fails for the caller who forgot -- who is the caller least likely to
+# notice. These pin that the refusal happens before anything is written.
+
+
+@pytest.mark.parametrize(
+    "endpoint,payload",
+    [
+        ("write", {"body": "blind"}),
+        ("patch-metadata", {"set": {"status": "blind"}}),
+        ("move", {"to": f"{ROOT}/Loimi/blind.md"}),
+        ("delete", {}),
+    ],
+)
+def test_an_update_without_a_version_or_overwrite_is_refused(client, endpoint, payload):
+    doc = client.get("/api/v1/documents", headers=AUTH).json()["documents"][0]
+    before = (client.vault_dir / ROOT / "Loimi" / "plan.md").read_text(encoding="utf-8")
+
+    r = client.post(f"/api/v1/documents/{endpoint}", json={"id": doc["id"], **payload}, headers=AUTH)
+
+    assert r.status_code == 400 and r.json()["error"] == "bad_request"
+    assert (client.vault_dir / ROOT / "Loimi" / "plan.md").read_text(encoding="utf-8") == before
+    assert not (client.vault_dir / ROOT / "Loimi" / "blind.md").exists()
+
+
+def test_overwrite_true_is_the_explicit_way_to_clobber(client):
+    doc = client.get("/api/v1/documents", headers=AUTH).json()["documents"][0]
+    r = client.post(
+        "/api/v1/documents/write",
+        json={"id": doc["id"], "body": "deliberate", "overwrite": True},
+        headers=AUTH,
+    )
+    assert r.status_code == 200
+    assert r.json()["document"]["body"].strip() == "deliberate"
+
+
+def test_overwrite_must_be_true_not_merely_present(client):
+    """`overwrite: false` is a caller saying no, not a caller saying nothing."""
+    doc = client.get("/api/v1/documents", headers=AUTH).json()["documents"][0]
+    r = client.post(
+        "/api/v1/documents/write",
+        json={"id": doc["id"], "body": "x", "overwrite": False},
+        headers=AUTH,
+    )
+    assert r.status_code == 400
+
+
+def test_create_needs_no_version_because_there_is_no_prior_state(client):
+    r = client.post(
+        "/api/v1/documents/create",
+        json={"path": f"{ROOT}/Loimi/fresh.md", "metadata": {"doc_type": "task"}},
+        headers=AUTH,
+    )
+    assert r.status_code == 201
+
+
 def test_a_stale_expected_version_is_409_with_the_current_one(client):
     doc = client.get("/api/v1/documents", headers=AUTH).json()["documents"][0]
     client.post(
-        "/api/v1/documents/write", json={"id": doc["id"], "body": "theirs"}, headers=AUTH
+        "/api/v1/documents/write",
+        json={"id": doc["id"], "body": "theirs", "overwrite": True},
+        headers=AUTH,
     )
     r = client.post(
         "/api/v1/documents/write",
@@ -301,7 +360,7 @@ def test_move_keeps_the_id(client):
     doc = client.get("/api/v1/documents", headers=AUTH).json()["documents"][0]
     r = client.post(
         "/api/v1/documents/move",
-        json={"id": doc["id"], "to": f"{ROOT}/Loimi/renamed.md"},
+        json={"id": doc["id"], "to": f"{ROOT}/Loimi/renamed.md", "overwrite": True},
         headers=AUTH,
     )
     assert r.json()["document"]["id"] == doc["id"]
@@ -310,7 +369,10 @@ def test_move_keeps_the_id(client):
 
 def test_delete(client):
     doc = client.get("/api/v1/documents", headers=AUTH).json()["documents"][0]
-    assert client.post("/api/v1/documents/delete", json={"id": doc["id"]}, headers=AUTH).json()["deleted"]
+    r = client.post(
+        "/api/v1/documents/delete", json={"id": doc["id"], "overwrite": True}, headers=AUTH
+    )
+    assert r.json()["deleted"]
     assert client.get("/api/v1/documents", headers=AUTH).json()["total"] == 0
 
 

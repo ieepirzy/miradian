@@ -141,10 +141,13 @@ What is actually true today:
   half-written document and Syncthing never sees a torn file.
 - `expected_version` turns a detected race into a `409`.
 
+- `/api/v1` **refuses** an update that passes neither `expected_version` nor
+  `"overwrite": true`, so a consumer cannot reach last-writer-wins by forgetting a
+  parameter — only by asking for it.
+
 What that does **not** give you: atomicity means nobody sees a half-written file, not
 that two writers cannot each land a complete write where the second silently discards
-the first's change. A caller that omits `expected_version` is last-writer-wins by
-construction, and the `/api/v1` surface allows omitting it.
+the first's change.
 
 Worse, the one writer that *cannot* participate is the human: Obsidian does not know
 what `expected_version` is. A human editing a document while MiraDesign patches its

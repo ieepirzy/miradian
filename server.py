@@ -140,6 +140,10 @@ API_CAPABILITIES = {
     "projects": True,
     "atomic_write": True,
     "optimistic_concurrency": True,
+    # Not merely offered: an update without expected_version or an explicit
+    # overwrite is refused, so a consumer cannot fall into last-writer-wins by
+    # forgetting a parameter.
+    "requires_expected_version": True,
     "change_feed": True,
     "stable_ids": ASSIGN_UID,
     "links": False,

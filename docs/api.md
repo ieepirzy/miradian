@@ -100,7 +100,8 @@ than assuming a feature exists.
   "api_version": "v1",
   "capabilities": {
     "documents": true, "projects": true, "atomic_write": true,
-    "optimistic_concurrency": true, "change_feed": true, "stable_ids": true,
+    "optimistic_concurrency": true, "requires_expected_version": true,
+    "change_feed": true, "stable_ids": true,
     "links": false, "search": false, "schema": false
   },
   "project_roots": ["03 🛠 Projects"],
@@ -111,6 +112,9 @@ than assuming a feature exists.
 
 `links` and `search` are `false`: Miradian has both internally, but they are
 Obsidian-shaped and are not exposed generically yet.
+
+`requires_expected_version: true` means updates are refused unless they pass
+`expected_version` or `"overwrite": true` — see [Concurrency](#concurrency).
 
 ### `GET /api/v1/health`
 
@@ -295,9 +299,29 @@ The vault is edited by a human in Obsidian, by agents over MCP, and by you, at t
 same time. Every write is atomic (temp file + `rename`), so nobody ever observes a
 half-written document.
 
-To avoid clobbering someone else's edit, pass the `version` you read as
-`expected_version`. A mismatch is a `409` carrying the current version rather than a
-silent overwrite. Without it, writes are last-writer-wins.
+**Every update must pass `expected_version`, or `"overwrite": true`. One with
+neither is refused with `400`.** That applies to `write`, `patch-metadata`, `move`
+and `delete`; `create` needs neither, because there is no prior state.
+
+- `expected_version` is the `version` you read. A mismatch is a `409` carrying
+  `current_version`, so a racing edit is refused rather than silently discarded.
+- `"overwrite": true` says you mean to clobber whatever is there — legitimate when
+  you are syncing from your own source of truth. It must be literally `true`;
+  `false` is a caller saying no, not a caller saying nothing.
+
+Making `expected_version` optional would make a blind write the accidental default,
+and "pass it or you get last-writer-wins" is a convention that fails exactly for the
+caller who forgot — who is also the caller least likely to notice. Requiring one or
+the other means a blind write is spelled at the call site, where a reviewer can see
+it and ask why.
+
+Scope and not-found errors are reported ahead of this one, so a `400` here means the
+document exists and you are allowed to touch it.
+
+**What this does not solve.** The writer who cannot participate is the human:
+Obsidian has never heard of `expected_version`. A person saving a document while you
+patch its metadata is a real lost update, and nothing in this API prevents it. See
+`design/unresolved.md` item 11.
 
 ## Configuration (server side)
 
