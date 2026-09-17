@@ -140,7 +140,6 @@ What is actually true today:
 - Every write is atomic (temp file + `os.replace`), so no reader ever observes a
   half-written document and Syncthing never sees a torn file.
 - `expected_version` turns a detected race into a `409`.
-
 - `/api/v1` **refuses** an update that passes neither `expected_version` nor
   `"overwrite": true`, so a consumer cannot reach last-writer-wins by forgetting a
   parameter — only by asking for it.
