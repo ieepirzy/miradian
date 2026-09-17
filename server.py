@@ -19,11 +19,17 @@ import uvicorn
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.elicitation import AcceptedElicitation, DeclinedElicitation
-from mcp.shared.exceptions import McpError
+try:
+    from mcp.shared.exceptions import McpError
+except ImportError:  # mcp 2.x renamed it; both spellings are in the wild
+    from mcp.shared.exceptions import MCPError as McpError
 from pydantic import Field
 from ruamel.yaml.comments import CommentedMap
 
 import schema as schema_mod
+from api import ApiDispatcher, create_api, parse_tokens
+from changes import ChangeJournal
+from documents import DocumentError, DocumentService, apply_metadata
 from vault import Vault, VaultError, join_frontmatter
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -57,6 +63,23 @@ PUBLIC_REGISTRATION = _env("MCP_PUBLIC_REGISTRATION", "false").lower() == "true"
 NO_AUTH = _env("MCP_NO_AUTH", "false").lower() == "true"
 MCP_PATH = _env("MCP_PATH", "/mcp")
 SSE_PATH = _env("SSE_PATH", "/sse")
+
+# Stateless streamable HTTP cannot carry a request the *server* initiates: an
+# elicitation reply comes back with a request id no session remembers, the session
+# crashes, and the tool call hangs forever. That is why the three human-approval
+# tools (vault_create_tag, vault_create_folder, vault_update_schema) have never
+# worked over the real transport -- only in the in-process tests, where the round
+# trip has a session to land in. Set this false and they work; verified end to end
+# in the container, refusing unattended and registering with a human.
+#
+# It defaults to true anyway, because that is what is deployed today and stateful
+# sessions are a real change: the client must carry Mcp-Session-Id, sessions live
+# in the memory of the process that handled initialize, a restart invalidates
+# outstanding ones, and more than one replica needs session affinity. The gate
+# fails closed either way -- a hung call widens nothing -- so keeping the current
+# behaviour as the default regresses nothing that ever worked.
+STATELESS_HTTP = _env("MCP_STATELESS_HTTP", "true").lower() != "false"
+
 TOKEN_TTL = int(_env("MCP_TOKEN_TTL", "3600"))
 REFRESH_TOKEN_TTL = int(_env("MCP_REFRESH_TOKEN_TTL", str(30 * 24 * 3600)))
 PORT = int(_env("PORT", "8000"))
@@ -75,8 +98,58 @@ SCHEMA_MODE = _env("SCHEMA_MODE", "strict").lower()
 
 DEFAULT_LIMIT = 25
 
+# --- structured-document service -------------------------------------------
+#
+# The generic layer MiraDesign and other non-MCP consumers talk to. Roots are
+# "::"-separated because vault folder names contain spaces, commas and emoji
+# ("03 🛠 Projects"), and a comma-separated list would split the wrong ones.
+PROJECT_ROOTS = [r.strip().strip("/") for r in _env("PROJECT_ROOTS", "03 🛠 Projects").split("::") if r.strip().strip("/")]
+DOC_TYPE_FIELD = _env("DOC_TYPE_FIELD", "doc_type")
+UID_FIELD = _env("UID_FIELD", "uid")
+ASSIGN_UID = _env("ASSIGN_UID", "true").lower() != "false"
+
+# The change journal. Must live outside the vault: Syncthing would replicate it
+# and git would track a file that changes on every poll. ChangeJournal refuses a
+# path inside the vault rather than trusting this default.
+STATE_DIR = _env("STATE_DIR") or os.path.join(
+    _env("XDG_STATE_HOME", os.path.expanduser("~/.local/state")), "miradian"
+)
+TOMBSTONE_LIMIT = int(_env("CHANGE_TOMBSTONE_LIMIT", "5000"))
+
+# Static bearer tokens for the JSON API, `name:secret,name2:secret2`. Unset means
+# the API refuses every request -- see api.py.
+API_TOKENS = parse_tokens(_env("MIRADIAN_API_TOKENS"))
+
 vault = Vault(VAULT_PATH)
 mcp = FastMCP("miradian")
+
+documents = DocumentService(
+    vault,
+    PROJECT_ROOTS,
+    doc_type_field=DOC_TYPE_FIELD,
+    uid_field=UID_FIELD,
+    assign_uid=ASSIGN_UID,
+)
+journal = ChangeJournal(documents, STATE_DIR, tombstone_limit=TOMBSTONE_LIMIT)
+
+# What the generic API implements, so a consumer degrades on absence rather than
+# discovering a 404 in production. The link graph and full-text search exist in
+# vault.py but are Obsidian-shaped and are not exposed generically yet.
+API_CAPABILITIES = {
+    "documents": True,
+    "projects": True,
+    "atomic_write": True,
+    "optimistic_concurrency": True,
+    # Not merely offered: an update without expected_version or an explicit
+    # overwrite is refused, so a consumer cannot fall into last-writer-wins by
+    # forgetting a parameter.
+    "requires_expected_version": True,
+    "change_feed": True,
+    "stable_ids": ASSIGN_UID,
+    "links": False,
+    "search": False,
+    "schema": False,
+}
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
@@ -778,12 +851,12 @@ def vault_update_frontmatter(
     if not set_fields and not unset_fields:
         return "Error: nothing to do — supply set_fields, unset_fields, or both."
 
+    # Same primitive the JSON API patches with, so set/unset means one thing in
+    # this server. The *policy* below it is what differs between the two surfaces:
+    # this one enforces the vault's frontmatter schema, the service surface does
+    # not, because a headless consumer has no human to approve a new tag.
     fm = note.frontmatter
-    for k, v in (set_fields or {}).items():
-        fm[k] = v
-    missing = [k for k in (unset_fields or []) if k not in fm]
-    for k in unset_fields or []:
-        fm.pop(k, None)
+    missing = apply_metadata(fm, set_fields, unset_fields)
 
     # Same gate as vault_write_note. Without it this tool is a way round the
     # schema: set status to anything, or unset a required field.
@@ -828,16 +901,81 @@ def vault_delete_note(
 
 
 # ---------------------------------------------------------------------------
+# Project tools
+# ---------------------------------------------------------------------------
+#
+# The agent-facing view of the same DocumentService the JSON API uses. Read-only
+# and deliberately thin: they add presentation, not logic. Writes stay on the
+# vault_* tools, which apply this vault's frontmatter schema and AI stamping --
+# routing them through the generic service would quietly drop both.
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+def project_list(response_format: Format = "markdown") -> str:
+    """List projects: the directories under the vault's configured project roots.
+
+    A project is a folder — creating one is just making the directory. The count is
+    of structured project documents, so a project full of ordinary notes shows zero.
+    """
+    projects = documents.discover_projects()
+    if not projects:
+        roots = ", ".join(f"`{r}`" for r in documents.roots) or "none configured"
+        return f"No projects found under {roots}. A project is a directory under a project root."
+
+    md = "\n".join(
+        f"- `{p.id}` — {p.document_count} structured document(s)"
+        + (f", last changed {p.updated_at}" if p.updated_at else ", empty")
+        for p in projects
+    )
+    return _render({"projects": [p.as_dict() for p in projects]}, response_format, md)
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+def project_documents(
+    project: Annotated[str | None, Field(description="Project id from project_list, e.g. '03 🛠 Projects/Loimi'. Omit for every project.")] = None,
+    doc_type: Annotated[str | None, Field(description="Only documents whose doc_type is this, e.g. 'task'.")] = None,
+    include_unstructured: Annotated[bool, Field(description="Also list ordinary notes that carry no doc_type.")] = False,
+    limit: Annotated[int, Field(ge=1, le=200)] = 50,
+    offset: Annotated[int, Field(ge=0)] = 0,
+    response_format: Format = "markdown",
+) -> str:
+    """List a project's structured documents — the ones carrying a `doc_type` field.
+
+    Ordinary project notes are excluded unless include_unstructured is set, so this
+    shows project *state* rather than everything filed under the project.
+    """
+    try:
+        refs = documents.list_documents(
+            project, doc_type=doc_type, include_unstructured=include_unstructured
+        )
+    except DocumentError as e:
+        return f"Error: {e}"
+
+    if not refs:
+        return f"No documents matched (project={project!r}, doc_type={doc_type!r})."
+
+    window, meta = _page(refs, limit, offset)
+    md = "\n".join(
+        f"- `{r.path}`" + (f" — [{r.doc_type}] {r.title}" if r.doc_type else f" — {r.title}")
+        for r in window
+    )
+    payload = {"documents": [r.as_dict() for r in window], **meta}
+    return _render(payload, response_format, md + _pagination_footer(meta))
+
+
+# ---------------------------------------------------------------------------
 # App assembly
 # ---------------------------------------------------------------------------
 
-app = mcp.http_app(path=MCP_PATH, transport="http", stateless_http=True)
+app = mcp.http_app(path=MCP_PATH, transport="http", stateless_http=STATELESS_HTTP)
 sse_app = mcp.http_app(path=SSE_PATH, transport="sse")
 
 # Serve both transports from one app so a single origo provider protects both.
 # /mcp is primary; /sse exists because some connector surfaces still require it.
 for route in sse_app.routes:
     app.router.routes.append(route)
+
+_verify_oauth = None
 
 if not NO_AUTH:
     from origo import OAuthMiddleware, OAuthProvider
@@ -870,6 +1008,23 @@ if not NO_AUTH:
 
     for _key, _value in vars(oauth_app.state)["_state"].items():
         setattr(app.state, _key, _value)
+
+    # Let a caller that already holds an MCP access token use it on /api/v1 too,
+    # rather than making them hold a second credential for the same server.
+    def _verify_oauth(token: str) -> bool:  # noqa: F811
+        return auth.verify_token(token, resource=auth.resource_identifier) is not None
+
+# The JSON API is not behind origo: origo has no client_credentials grant, so a
+# headless consumer could not get a token, and its public-path list is exact-match
+# so it cannot express "/api/v1/*" either. It carries its own bearer-token check.
+api_app = create_api(
+    documents,
+    journal,
+    tokens=API_TOKENS,
+    verify_oauth=_verify_oauth,
+    require_auth=not NO_AUTH,
+    capabilities=API_CAPABILITIES,
+)
 
 # Both transports carry their own lifespan (session managers); run both.
 _http_lifespan = app.router.lifespan_context
@@ -906,11 +1061,32 @@ async def _lifespan(scope):
                 if sch
                 else "none found in vault — writes are not validated",
             )
+
+            logger.info(
+                "documents: roots=%s, %d project(s), marker=%r, state=%s",
+                PROJECT_ROOTS, len(documents.discover_projects()), DOC_TYPE_FIELD, STATE_DIR,
+            )
+            if STATELESS_HTTP:
+                logger.info(
+                    "mcp: stateless HTTP. The three human-approval tools "
+                    "(vault_create_tag, vault_create_folder, vault_update_schema) cannot "
+                    "complete an elicitation round trip on this transport and will hang. "
+                    "Set MCP_STATELESS_HTTP=false to enable them."
+                )
+            if not API_TOKENS and not NO_AUTH:
+                logger.warning(
+                    "api: MIRADIAN_API_TOKENS is unset — /api/v1 refuses every request. "
+                    "Set it to `name:secret` pairs to let a service consumer in."
+                )
             yield
 
 
 app.router.lifespan_context = _lifespan
 
+# /api/* goes to the JSON API, everything else (including every lifespan scope) to
+# the MCP app and its OAuth middleware. See ApiDispatcher for why this is not a Mount.
+asgi_app = ApiDispatcher(app, api_app)
+
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(asgi_app, host="0.0.0.0", port=PORT)

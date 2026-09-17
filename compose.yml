@@ -15,8 +15,19 @@ services:
     restart: unless-stopped
     volumes:
       - ${VAULT_PATH}:/vault
+      # The change journal. A named volume, not a vault subdirectory: inside the
+      # vault, Syncthing would replicate it between machines that each write their
+      # own sequence numbers into it. Losing it is survivable -- consumers get
+      # `reset: true` and re-ingest -- but losing it on every restart is wasteful.
+      - miradian-state:/state
     environment:
       VAULT_PATH: /vault
+      STATE_DIR: /state
+      PROJECT_ROOTS: ${PROJECT_ROOTS:-}
+      DOC_TYPE_FIELD: ${DOC_TYPE_FIELD:-doc_type}
+      UID_FIELD: ${UID_FIELD:-uid}
+      ASSIGN_UID: ${ASSIGN_UID:-true}
+      MIRADIAN_API_TOKENS: ${MIRADIAN_API_TOKENS:-}
       MCP_BASE_URL: ${MCP_BASE_URL}
       MCP_CLIENT_ID: ${MCP_CLIENT_ID:-miradian}
       MCP_CLIENT_SECRET: ${MCP_CLIENT_SECRET}
@@ -32,3 +43,6 @@ services:
       - "${BOUND_IP:-127.0.0.1}:${PORT:-27125}:8000"
     security_opt:
       - no-new-privileges:true
+
+volumes:
+  miradian-state:
