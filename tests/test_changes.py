@@ -85,12 +85,19 @@ def test_create_update_move_delete_each_reported_once(journal):
     assert types(r) == ["updated"] and r["changes"][0]["id"] == uid
     cursor = r["cursor"]
 
+    before = journal.service.read_document(id=uid).version
     journal.service.move_document(id=uid, to=f"{ROOT}/Loimi/b.md")
     r = journal.poll(cursor)
     assert types(r) == ["moved"]
     assert r["changes"][0]["previous_path"] == f"{ROOT}/Loimi/a.md"
     assert r["changes"][0]["path"] == f"{ROOT}/Loimi/b.md"
     assert r["changes"][0]["id"] == uid  # identity is untouched by a move
+    # A move does not touch the bytes, so the version is unchanged -- which means
+    # a scan comparing content alone would see nothing at all here. scan() checks
+    # path before version for exactly this reason: relocation changes which project
+    # a document belongs to, so a consumer that never hears about it keeps filing
+    # the document under the old one.
+    assert r["changes"][0]["version"] == before
     cursor = r["cursor"]
 
     journal.service.delete_document(id=uid)
@@ -248,6 +255,36 @@ def test_changes_page_and_the_cursor_carries_on(journal):
     second = journal.poll(first["cursor"], limit=10)
     assert len(second["changes"]) == 3 and second["has_more"] is False
     assert journal.poll(second["cursor"])["changes"] == []
+
+
+def test_draining_on_has_more_alone_reaches_everything(journal):
+    """What a consumer that trusts the flag actually does.
+
+    The paging test above advances the cursor by hand and would pass even if
+    has_more always answered False -- it never asks the flag anything. This drains
+    purely on has_more, so a lying flag ends the loop early and the assertion on
+    the full set fails. Hardcode `has_more = False` in poll() and this is the test
+    that notices.
+
+    The bound on the loop is not decoration: a feed whose has_more never clears is
+    a hang in the consumer, and a hang is worse to diagnose than a wrong answer.
+    """
+    for i in range(7):
+        write(journal.vault_dir, f"{ROOT}/Loimi/{i}.md", doc(str(i)))
+
+    seen: set[str] = set()
+    cursor = None
+    for _ in range(50):
+        batch = journal.poll(cursor, limit=2)
+        seen.update(c["id"] for c in batch["changes"])
+        cursor = batch["cursor"]
+        if not batch["has_more"]:
+            break
+    else:
+        pytest.fail("has_more never cleared: a consumer draining on it would spin forever")
+
+    assert len(seen) == 7
+    assert seen == {r.id for r in journal.service.list_documents()}
 
 
 def test_tombstones_are_capped(journal):
