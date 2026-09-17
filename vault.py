@@ -7,6 +7,7 @@ or a write racing Obsidian-on-another-machine produces sync-conflict files.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -79,6 +80,13 @@ class Note:
     links: list[Link]
     mtime: float
     size: int
+    # sha256 of the file's text, truncated. A content version consumers can hand
+    # back for optimistic concurrency. mtime and size cannot serve: a same-second
+    # edit of equal length is invisible to both, and mtime is not monotonic across
+    # a Syncthing replica. Computed where the bytes are already in hand, so it
+    # costs nothing beyond the hash itself, and survives untouched on the cache
+    # path where the note is not re-read at all.
+    hash: str = ""
 
     @property
     def stem(self) -> str:
@@ -113,6 +121,28 @@ def _normalize_tags(raw) -> list[str]:
     else:
         parts = [str(t).strip() for t in raw]
     return [p.lstrip("#") for p in parts if p and p.strip("#")]
+
+
+def content_hash(text: str) -> str:
+    """A short, stable version identifier for a note's text.
+
+    Truncated to 16 hex characters: this identifies a version to compare against,
+    not a secret to resist collision attacks, and a short one stays readable in
+    logs and API responses.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def has_frontmatter_fence(text: str) -> bool:
+    """Does this text open with a `---` frontmatter fence?
+
+    Paired with an empty frontmatter map from split_frontmatter, a True here means
+    the YAML is malformed -- the fence is there but nothing parsed out of it. That
+    distinction matters: writing a rebuilt frontmatter block onto such a file would
+    prepend a *second* block above the broken one and corrupt it further.
+    """
+    lines = text.split("\n", 1)
+    return bool(lines) and lines[0].strip() == "---"
 
 
 def split_frontmatter(text: str) -> tuple[CommentedMap, str]:
@@ -334,6 +364,7 @@ class Vault:
                     links=parse_links(body) + _frontmatter_links(fm),
                     mtime=st.st_mtime,
                     size=st.st_size,
+                    hash=content_hash(text),
                 )
                 changed = True
 
@@ -576,6 +607,38 @@ class Vault:
 
             self.refresh()
             return self._rel(full)
+
+    def move(self, src: str, dst: str) -> str:
+        """Rename or relocate a note. Refuses to clobber an existing file.
+
+        os.replace would be atomic but overwrites silently, which for a move is
+        data loss rather than a race-free update -- so the destination is checked
+        first and os.rename is used, which fails on an existing file on POSIX only
+        for directories. The explicit check is what actually guards it; the window
+        between check and rename is accepted, because the alternative (link+unlink)
+        does not work across filesystems and a vault is one tree.
+
+        Wikilinks pointing at the old name are NOT rewritten. Obsidian resolves
+        links by note name wherever the file sits, so a relocation inside the vault
+        keeps resolving; a rename genuinely breaks inbound links, and rewriting
+        other people's notes as a side effect of a move is worse than leaving the
+        link visibly unresolved (vault_get_links reports it).
+        """
+        with self._lock:
+            note = self.get(src)
+            src_full = self.resolve_path(note.rel)
+            dst_full = self.resolve_path(dst)
+            if dst_full.suffix != ".md":
+                raise VaultError(f"Only .md notes can be moved; destination is {dst_full.name!r}.")
+            if dst_full == src_full:
+                return note.rel
+            if dst_full.exists():
+                raise VaultError(f"Cannot move onto an existing note: {dst!r}.")
+
+            dst_full.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(src_full, dst_full)
+            self.refresh()
+            return self._rel(dst_full)
 
     def trash(self, rel: str) -> str:
         """Move a note to .trash/ instead of unlinking it.

@@ -15,6 +15,13 @@ fi
 VAULT_UID="$(stat -c %u "$VAULT")"
 VAULT_GID="$(stat -c %g "$VAULT")"
 
+# The change journal's directory is created by the image as root, but the server
+# runs as the vault's owner. Without this the first poll cannot persist and every
+# restart hands consumers a new epoch and a full resync.
+STATE="${STATE_DIR:-/state}"
+mkdir -p "$STATE"
+chown "$VAULT_UID:$VAULT_GID" "$STATE" 2>/dev/null || true
+
 if [ "$VAULT_UID" = "0" ]; then
   exec python /app/server.py
 fi

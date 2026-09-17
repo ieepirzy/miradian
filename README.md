@@ -1,9 +1,16 @@
 # miradian
 
-MCP server giving AI agents CRUD and link-graph access to an Obsidian vault.
+Two surfaces over one Obsidian vault, read as **plain markdown on disk** — no
+Obsidian process, no database, no plugins:
 
-Reads the vault as **plain markdown on disk**. No Obsidian process, no database,
-no plugins.
+- **MCP** (`/mcp`, `/sse`) — CRUD, search and link-graph tools for AI agents, with
+  this vault's frontmatter schema enforced on writes.
+- **A structured-document JSON API** (`/api/v1`) — a generic project-state backend
+  for services. Markdown + frontmatter is the whole abstraction; no Obsidian
+  semantics reach it. See [`docs/api.md`](docs/api.md).
+
+Obsidian specifics terminate inside miradian. The agent surface embraces them; the
+service surface never sees them.
 
 ## Why not an existing Obsidian MCP?
 
@@ -53,6 +60,12 @@ returning `has_more`/`next_offset`), and all take `response_format=markdown|json
 | `vault_get_backlinks` | What links to this note |
 | `vault_get_links` | Outgoing links, flagging unresolved ones |
 | `vault_get_neighborhood` | Local subgraph within N hops |
+
+**Projects** — the agent-facing view of the structured-document layer below
+| Tool | Purpose |
+|---|---|
+| `project_list` | Projects: the directories under the configured project roots |
+| `project_documents` | A project's structured documents |
 
 `vault_get_links` reports links pointing at notes that don't exist yet — in
 practice, a to-do list of notes you meant to write.
@@ -107,6 +120,37 @@ they are not a security boundary. Elicitation is.
 `SCHEMA_MODE=strict|warn|off`. A vault with no `METADATA.md` schema block
 degrades to `off` on its own, so miradian works fine on a vault that has never
 heard of any of this.
+
+## The structured-document API
+
+`/api/v1` exists for services that want to use the vault as **project state** rather
+than as a knowledge base. Full reference: [`docs/api.md`](docs/api.md). Design
+rationale: [`design/structured-document-api.md`](design/structured-document-api.md).
+
+- **A project is a directory** under a configured root (`PROJECT_ROOTS`, default
+  `03 🛠 Projects`). Starting one is `mkdir` — nothing else.
+- **A document is project state only if it says so**, by carrying a `doc_type` field
+  in its frontmatter. Ordinary project notes coexist in the same folders, are hidden
+  from the default listing, never enter the change feed, and are never modified.
+  The `doc_type` vocabulary belongs to the consumer; miradian only tests for the
+  field's presence.
+- **`uid` is identity, `path` is location.** miradian stamps a uid into each managed
+  document's frontmatter once, so identity survives a move, a rename, Syncthing, git,
+  and miradian losing all of its own state. Dragging a file in Obsidian changes its
+  path and not its id.
+- **Change detection is polling.** `GET /api/v1/changes?cursor=` returns what changed
+  since a cursor, as `created`/`updated`/`moved`/`deleted`. The only durable state is
+  one JSON file outside the vault; losing it degrades to `reset: true` and a full
+  re-ingest, which is the consumer's only recovery path.
+- **Optimistic concurrency.** Every document carries a content-hash `version`; hand
+  it back as `expected_version` and a racing edit is a `409` instead of a silent
+  overwrite.
+- **The vault schema does not apply here.** `METADATA.md` governs the agent surface.
+  A service consumer has no human attached, so it must never meet an elicitation
+  prompt on an ordinary write — and would fail the vault's required fields anyway.
+- **Auth is a static bearer token** (`MIRADIAN_API_TOKENS=name:secret`), because
+  origo has no `client_credentials` grant. Unset means the API refuses everything.
+- **Scope**: `/api/v1` cannot address anything outside the project roots.
 
 ## Design notes
 
@@ -183,6 +227,13 @@ Include the port if clients use one:
 | `MCP_PATH` / `SSE_PATH` | `/mcp` / `/sse` | |
 | `BOUND_IP` | `127.0.0.1` | Host address the port is published on. Use a private/VPN interface. Never `0.0.0.0` |
 | `PORT` | `27125` | Host port |
+| `MIRADIAN_API_TOKENS` | — | `name:secret,…` for `/api/v1`. **Unset means the API refuses every request** |
+| `PROJECT_ROOTS` | `03 🛠 Projects` | `::`-separated. Not comma — vault folder names contain commas and spaces |
+| `DOC_TYPE_FIELD` | `doc_type` | Frontmatter field marking a document as project state |
+| `UID_FIELD` | `uid` | Frontmatter field holding a document's identity |
+| `ASSIGN_UID` | `true` | Stamp uids into managed documents |
+| `STATE_DIR` | `~/.local/state/miradian`, `/state` in the container | Change journal. Must be outside the vault |
+| `CHANGE_TOMBSTONE_LIMIT` | `5000` | Deletions the change journal remembers |
 
 ## Deploy
 
