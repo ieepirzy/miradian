@@ -601,6 +601,14 @@ class DocumentService:
             if existing:
                 fm[self.uid_field] = existing
 
+        # A write that adds doc_type promotes an ordinary note to project state, and
+        # must hand back an identity in the same response -- exactly as patch_metadata
+        # and create do. Without this the caller gets id: null and the uid appears
+        # later, on whichever read happens to converge it: the same operation with two
+        # different answers depending on which verb was used.
+        if self.assign_uid and self.is_managed(_fake_note(note.rel, fm)) and not fm.get(self.uid_field):
+            fm[self.uid_field] = _new_uid()
+
         return self._commit(note.rel, fm, body)
 
     def patch_metadata(

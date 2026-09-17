@@ -225,6 +225,7 @@ Include the port if clients use one:
 | `STAMP_DATE` | `true` | Add `date:` to new notes. Set `false` to opt out |
 | `SCHEMA_MODE` | `strict` | `strict` refuses invalid writes, `warn` allows + reports, `off` disables |
 | `MCP_PATH` / `SSE_PATH` | `/mcp` / `/sse` | |
+| `MCP_STATELESS_HTTP` | `true` | Stateless HTTP cannot complete a server-initiated request, so the three approval-gated tools hang instead of prompting. Set `false` to enable them — clients then carry `Mcp-Session-Id` and a restart invalidates sessions |
 | `BOUND_IP` | `127.0.0.1` | Host address the port is published on. Use a private/VPN interface. Never `0.0.0.0` |
 | `PORT` | `27125` | Host port |
 | `MIRADIAN_API_TOKENS` | — | `name:secret,…` for `/api/v1`. **Unset means the API refuses every request** |

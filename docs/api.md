@@ -238,7 +238,10 @@ Types: `created`, `updated`, `moved`, `deleted`.
 2. If `reset` is `true`, **discard your view and re-ingest what comes back.** That is
    the only recovery you have to implement. It happens on your first poll, after the
    server's journal is lost or rebuilt, and if your cursor is unrecognisable.
-3. Apply the changes, keyed by `id`.
+3. Apply the changes as **upserts keyed by `id`** — not as literal create/update/delete
+   commands. A batch that follows a `reset` (`has_more` was true, so you polled again
+   with the new cursor) carries real types like `updated` and `moved` for documents
+   you have not ingested yet, so treat an `updated` for an unknown id as a create.
 4. Store the returned `cursor`.
 5. If `has_more` is `true`, poll again immediately with the new cursor.
 

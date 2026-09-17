@@ -96,18 +96,27 @@ disagree twice over:
 Moving to 4.x is a deliberate port with its own testing, not something to let a
 resolver decide during a `docker build`. Unscheduled.
 
-## 10. Stateful MCP sessions
+## 10. Stateful MCP sessions — needs Ilari's call
 
-`stateless_http` is now `False`. It had to change: under stateless HTTP the server
-cannot receive a client's answer to a request *it* made, so every elicitation
-response arrived with a request id no session remembered, the session crashed, and
-the tool call hung forever. All three approval-gated tools were unusable over the
-real transport and only ever worked in the in-process tests.
+Under stateless streamable HTTP the server cannot receive a client's answer to a
+request *it* made: every elicitation response arrives with a request id no session
+remembers, the session crashes, and the tool call hangs forever. All three
+approval-gated tools have therefore never worked over the real transport — they
+only ever worked in the in-process tests.
 
-Verified fixed end to end in the container (refuses unattended, registers with a
-human). The cost is that the server now holds per-session state, which matters if
-miradian is ever run as more than one replica. For a single-user private server it
-is the right trade, but it is a constraint that did not exist before.
+`MCP_STATELESS_HTTP=false` fixes it, verified end to end in the container (refuses
+unattended, registers with a human).
+
+Shipped: the default stays `true`, i.e. what is deployed today. Turning it off is a
+genuine change to the transport — the client must carry `Mcp-Session-Id`, sessions
+live in the memory of the process that handled `initialize`, a restart invalidates
+outstanding ones, and more than one replica needs session affinity. The claude.ai
+remote connector is the client that matters and cannot be tested from a dev box.
+
+So: flip it, confirm the connector still works, and keep it off. The gate fails
+closed either way, so leaving it on regresses nothing that ever worked — it just
+leaves `vault_create_tag`, `vault_create_folder` and `vault_update_schema`
+unusable, which is the status quo.
 
 ## 11. Rate of scanning
 

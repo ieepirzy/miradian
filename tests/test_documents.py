@@ -308,6 +308,17 @@ def test_a_rejected_policy_leaves_the_file_alone(tree, tmp_path):
     assert (tmp_path / ROOT / "Loimi" / "plan.md").read_text(encoding="utf-8") == before
 
 
+def test_writing_in_a_doc_type_makes_a_note_managed_and_stamps_it(tree):
+    """Promoting a note must return its identity, whichever verb did the promoting."""
+    doc = tree.write_document(
+        path=f"{ROOT}/Loimi/research notes.md",
+        body="Now it is project state.",
+        metadata={"doc_type": "decision", "title": "Promoted"},
+    )
+    assert doc.structured and doc.id
+    assert tree.read_document(id=doc.id).path == f"{ROOT}/Loimi/research notes.md"
+
+
 def test_patching_in_a_doc_type_makes_a_note_managed_and_stamps_it(tree):
     ref = tree.patch_metadata(
         path=f"{ROOT}/Loimi/research notes.md", set_fields={"doc_type": "decision"}

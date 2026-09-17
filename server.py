@@ -63,6 +63,23 @@ PUBLIC_REGISTRATION = _env("MCP_PUBLIC_REGISTRATION", "false").lower() == "true"
 NO_AUTH = _env("MCP_NO_AUTH", "false").lower() == "true"
 MCP_PATH = _env("MCP_PATH", "/mcp")
 SSE_PATH = _env("SSE_PATH", "/sse")
+
+# Stateless streamable HTTP cannot carry a request the *server* initiates: an
+# elicitation reply comes back with a request id no session remembers, the session
+# crashes, and the tool call hangs forever. That is why the three human-approval
+# tools (vault_create_tag, vault_create_folder, vault_update_schema) have never
+# worked over the real transport -- only in the in-process tests, where the round
+# trip has a session to land in. Set this false and they work; verified end to end
+# in the container, refusing unattended and registering with a human.
+#
+# It defaults to true anyway, because that is what is deployed today and stateful
+# sessions are a real change: the client must carry Mcp-Session-Id, sessions live
+# in the memory of the process that handled initialize, a restart invalidates
+# outstanding ones, and more than one replica needs session affinity. The gate
+# fails closed either way -- a hung call widens nothing -- so keeping the current
+# behaviour as the default regresses nothing that ever worked.
+STATELESS_HTTP = _env("MCP_STATELESS_HTTP", "true").lower() != "false"
+
 TOKEN_TTL = int(_env("MCP_TOKEN_TTL", "3600"))
 REFRESH_TOKEN_TTL = int(_env("MCP_REFRESH_TOKEN_TTL", str(30 * 24 * 3600)))
 PORT = int(_env("PORT", "8000"))
@@ -946,17 +963,7 @@ def project_documents(
 # App assembly
 # ---------------------------------------------------------------------------
 
-# Stateful, not stateless. Under stateless_http the server cannot receive the
-# client's answer to a request it made: the elicitation reply arrives with a
-# request id no session remembers, the session crashes, and the tool call hangs
-# forever instead of returning. That silently disabled all three human-approval
-# tools over the real transport -- they only ever worked in the in-process tests,
-# where the round trip has a session to land in.
-#
-# It failed safe (a hung call widens nothing) but it failed, and the hang is
-# indistinguishable from a wedged agent. Sessions cost a little memory on a
-# single-user server and are what elicitation requires.
-app = mcp.http_app(path=MCP_PATH, transport="http", stateless_http=False)
+app = mcp.http_app(path=MCP_PATH, transport="http", stateless_http=STATELESS_HTTP)
 sse_app = mcp.http_app(path=SSE_PATH, transport="sse")
 
 # Serve both transports from one app so a single origo provider protects both.
@@ -1055,6 +1062,13 @@ async def _lifespan(scope):
                 "documents: roots=%s, %d project(s), marker=%r, state=%s",
                 PROJECT_ROOTS, len(documents.discover_projects()), DOC_TYPE_FIELD, STATE_DIR,
             )
+            if STATELESS_HTTP:
+                logger.info(
+                    "mcp: stateless HTTP. The three human-approval tools "
+                    "(vault_create_tag, vault_create_folder, vault_update_schema) cannot "
+                    "complete an elicitation round trip on this transport and will hang. "
+                    "Set MCP_STATELESS_HTTP=false to enable them."
+                )
             if not API_TOKENS and not NO_AUTH:
                 logger.warning(
                     "api: MIRADIAN_API_TOKENS is unset — /api/v1 refuses every request. "
