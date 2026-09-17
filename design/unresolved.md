@@ -50,16 +50,27 @@ The options are a project manifest document (`_project.md` with its own uid), or
 accepting that project ids are paths and consumers re-resolve on rename. The first
 adds required ceremony to "a project is a directory", which was an explicit goal.
 
-## 5. Where does coordination state live?
+## 5. Where does coordination state live? — answered for now
 
-MiraDesign is keeping status, priority, assignment and review state in Postgres and
-using Markdown for narrative only. If that inverts — if task status belongs in
-frontmatter — the write volume against Miradian changes character completely: from
-human-paced document edits to machine-paced field updates, with Syncthing
-replicating every one of them.
+Status, priority, assignment, presence, review state, cursors and the event log stay
+in MiraDesign's Postgres; Markdown holds narrative only, referenced by `doc_ref`.
+Confirmed by MiraDesign 2026-09-17; it is their decision (their D1) and they have
+committed to saying so before any change ships rather than after.
 
-Shipped: nothing assumes either way. This is MiraDesign's decision (their D1), but
-the answer determines whether poll-based change detection stays adequate.
+That answer is what the polling design is sized for: human-paced document creation
+and metadata patches. If it ever inverts and task status moves into frontmatter,
+the write volume changes character completely — machine-paced field updates, each
+one replicated by Syncthing — and poll-based change detection would need revisiting
+along with the atomic-write-per-field cost.
+
+Miradian assumes neither way. The entry stays open because the *consequence* is
+Miradian's problem even though the decision is not.
+
+Related, and explicitly **not** Miradian's to solve: what a consumer does when a
+human deletes a `uid:` line by hand and a stored reference orphans. MiraDesign
+degrades deliberately — the document 404s, metadata comes back null, the board
+still renders. A sidecar index that could itself drift would be worse than an
+honest 404, so nothing is defended against here.
 
 ## 6. Does the `.trash/` delete semantic belong on the generic API?
 
