@@ -337,7 +337,7 @@ class DocumentService:
         try:
             for rel in need:
                 try:
-                    self._stamp_uid(rel)
+                    self._stamp_uid(notes[rel])
                 except (VaultError, OSError, Malformed) as e:
                     # One unwritable document must not stop the rest from
                     # converging, and it must not fail the caller's read.
@@ -346,8 +346,14 @@ class DocumentService:
             self._stamping = False
         return True
 
-    def _stamp_uid(self, rel: str) -> str:
-        note = self.vault.get(rel)
+    def _stamp_uid(self, note: Note) -> str:
+        """Takes a Note, not a path, so Obsidian's name resolution cannot get in.
+
+        `Vault.get` resolves a bare name to whichever note has that stem, shallowest
+        wins. That is an Obsidian rule, and every caller here happens to pass an
+        exact indexed path -- but "happens to" is how it leaks the day someone
+        passes a user-supplied string. Taking the Note removes the question.
+        """
         self._guard_rewritable(note)
         uid = _new_uid()
         fm = note.frontmatter
