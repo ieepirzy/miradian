@@ -354,11 +354,15 @@ class DocumentService:
         exact indexed path -- but "happens to" is how it leaks the day someone
         passes a user-supplied string. Taking the Note removes the question.
         """
-        self._guard_rewritable(note)
         uid = _new_uid()
-        fm = note.frontmatter
-        fm[self.uid_field] = uid
-        self.vault.write_atomic(note.rel, join_frontmatter(fm, note.body))
+
+        def transform(fresh: Note) -> str:
+            self._guard_rewritable(fresh)
+            fm = fresh.frontmatter
+            fm[self.uid_field] = uid
+            return join_frontmatter(fm, fresh.body)
+
+        self.vault.edit(note.rel, transform)
         return uid
 
     def _guard_rewritable(self, note: Note) -> None:
@@ -590,10 +594,16 @@ class DocumentService:
         never looked at. Passing `metadata` replaces the block wholesale; use
         `patch_metadata` to change individual fields.
         """
-        note = self.resolve(id, path)
-        self._check_version(note, expected_version)
-        self._guard_rewritable(note)
+        rel = self.resolve(id, path).rel
 
+        def transform(note: Note) -> str:
+            self._check_version(note, expected_version)
+            self._guard_rewritable(note)
+            return join_frontmatter(self._merged_frontmatter(note, metadata), body)
+
+        return self._edit(rel, transform)
+
+    def _merged_frontmatter(self, note: Note, metadata: dict | None) -> CommentedMap:
         if metadata is None:
             fm = note.frontmatter
         else:
@@ -614,8 +624,7 @@ class DocumentService:
         # different answers depending on which verb was used.
         if self.assign_uid and self.is_managed(_fake_note(note.rel, fm)) and not fm.get(self.uid_field):
             fm[self.uid_field] = _new_uid()
-
-        return self._commit(note.rel, fm, body)
+        return fm
 
     def patch_metadata(
         self,
@@ -637,24 +646,35 @@ class DocumentService:
         if not set_fields and not unset_fields:
             raise DocumentError("Nothing to do: supply set, unset, or both.")
 
-        note = self.resolve(id, path)
-        self._check_version(note, expected_version)
-        self._guard_rewritable(note)
-
-        fm = note.frontmatter
         if self.uid_field in (unset_fields or []):
             raise DocumentError(f"{self.uid_field!r} is the document's identity and cannot be unset.")
-        missing = apply_metadata(fm, set_fields, unset_fields)
 
-        if policy:
-            errors = policy(fm, note.rel)
-            if errors:
-                raise PolicyRejected("The change was refused by the active policy.", errors)
+        rel = self.resolve(id, path).rel
+        missing: list[str] = []
 
-        if self.assign_uid and self.is_managed(_fake_note(note.rel, fm)) and not fm.get(self.uid_field):
-            fm[self.uid_field] = _new_uid()
+        def transform(note: Note) -> str:
+            # Every check runs in here, against the note the write is built from.
+            # Checking outside would also work today -- resolve() goes through the
+            # index and takes the same lock a write holds -- but only incidentally,
+            # and it would stop working the moment the index were cached or made
+            # lock-free. Compared against the bytes being written, it is correct by
+            # construction instead.
+            self._check_version(note, expected_version)
+            self._guard_rewritable(note)
 
-        return self._commit(note.rel, fm, note.body), missing
+            fm = note.frontmatter
+            missing.extend(apply_metadata(fm, set_fields, unset_fields))
+
+            if policy:
+                errors = policy(fm, note.rel)
+                if errors:
+                    raise PolicyRejected("The change was refused by the active policy.", errors)
+
+            if self.assign_uid and self.is_managed(_fake_note(note.rel, fm)) and not fm.get(self.uid_field):
+                fm[self.uid_field] = _new_uid()
+            return join_frontmatter(fm, note.body)
+
+        return self._edit(rel, transform), missing
 
     def move_document(
         self,
@@ -694,6 +714,28 @@ class DocumentService:
         except VaultError as e:
             raise DocumentError(str(e)) from e
         return {"id": uid, "path": note.rel, "deleted": True, "recoverable_at": dest}
+
+    def _edit(self, rel: str, transform) -> Document:
+        """Read, transform and write under one lock acquisition.
+
+        The service used to read a Note, mutate `note.frontmatter`, and write --
+        three steps with no lock between them. `Vault.get` returns the live Note
+        held in the index rather than a copy, so two concurrent calls for the same
+        document were mutating the very same ruamel CommentedMap: not merely a
+        lost update but a data race on ruamel's own bookkeeping. The atomic write
+        never helped, because what it wrote atomically was already corrupt.
+
+        `rel` is always an exact indexed path from `resolve()`, so `Vault.get`
+        inside `edit` matches it directly and its Obsidian bare-name fallback is
+        never reached.
+        """
+        try:
+            written = self.vault.edit(rel, transform)
+        except VaultError as e:
+            raise DocumentError(str(e)) from e
+        except OSError as e:
+            raise DocumentError(f"Could not write {rel!r}: {e}") from e
+        return self._ref(self.vault.notes()[written], body=True)  # type: ignore[return-value]
 
     def _commit(self, rel: str, fm: CommentedMap, body: str) -> Document:
         try:

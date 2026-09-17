@@ -442,3 +442,110 @@ def test_plain_handles_nested_structures():
     from datetime import date
 
     assert plain({"a": [date(2026, 1, 2), {"b": 1}]}) == {"a": ["2026-01-02", {"b": 1}]}
+
+
+# --- concurrency -----------------------------------------------------------
+#
+# The vault has three writers: a human in Obsidian, agents over MCP, and a
+# service over HTTP. These cover the two that go through this layer. They are
+# the first concurrency cases in either this suite or MiraDesign's.
+
+
+def test_concurrent_patches_all_land_and_nothing_raises(tree):
+    """Eight threads, eight fields, one document.
+
+    A smoke test, and worth being precise about what it does not show: it passes
+    with or without the lock, because unlocked callers mutate one shared ruamel
+    CommentedMap and so accidentally accumulate each other's fields. The case
+    below is the one that actually distinguishes them.
+    """
+    import threading
+
+    tree.list_documents()
+    doc = tree.read_document(path=f"{ROOT}/Loimi/plan.md")
+
+    errors: list[Exception] = []
+
+    def patch(i: int) -> None:
+        try:
+            tree.patch_metadata(id=doc.id, set_fields={f"field_{i}": i})
+        except Exception as e:  # noqa: BLE001 - the assertion is that there are none
+            errors.append(e)
+
+    threads = [threading.Thread(target=patch, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    final = tree.read_document(id=doc.id)
+    assert all(final.metadata.get(f"field_{i}") == i for i in range(8)), final.metadata
+    # The body and the pre-existing metadata survived all eight.
+    assert final.metadata["title"] == "Ship v1"
+    assert "Body text." in final.body
+
+
+def test_concurrent_writes_leave_a_readable_document(tree):
+    """Last-writer-wins on the body is expected; corruption is not."""
+    import threading
+
+    tree.list_documents()
+    doc = tree.read_document(path=f"{ROOT}/Loimi/task-1.md")
+
+    def write(i: int) -> None:
+        tree.write_document(id=doc.id, body=f"body from writer {i}")
+
+    threads = [threading.Thread(target=write, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    final = tree.read_document(id=doc.id)
+    assert final.body.strip().startswith("body from writer")
+    assert final.id == doc.id           # identity survived every one of them
+    assert final.doc_type == "work_item"
+
+
+def test_two_patches_from_one_read_cannot_both_win(tree):
+    """Both threads hold the same `expected_version`: exactly one may win.
+
+    This pins the guarantee a consumer actually relies on. It is worth recording
+    what it does *not* do, since the temptation is to read it as proof that the
+    version check belongs inside the lock: it passes with the check outside too.
+    `resolve()` goes through the vault index, which takes the same lock a write
+    holds, so a second caller cannot complete its read while the first is
+    writing, and the outer check sees the new version anyway.
+
+    The check still belongs inside the transform, but for a reason a test cannot
+    show: outside, correctness leans on an incidental property of `resolve()`
+    rather than on anything stated. Inside, the version is compared against the
+    very bytes the write is built from, and stays right if the index is ever
+    cached or made lock-free.
+    """
+    import threading
+
+    tree.list_documents()
+    doc = tree.read_document(path=f"{ROOT}/Loimi/plan.md")
+
+    results: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def patch(i: int) -> None:
+        barrier.wait()  # maximise the overlap rather than hoping for it
+        try:
+            tree.patch_metadata(
+                id=doc.id, set_fields={"winner": i}, expected_version=doc.version
+            )
+            results.append("ok")
+        except Conflict:
+            results.append("conflict")
+
+    threads = [threading.Thread(target=patch, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(results) == ["conflict", "ok"], results

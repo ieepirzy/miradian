@@ -129,11 +129,10 @@ closed either way, so leaving it on regresses nothing that ever worked — it ju
 leaves `vault_create_tag`, `vault_create_folder` and `vault_update_schema`
 unusable, which is the status quo.
 
-## 11. Three writers, and no concurrency test anywhere
+## 11. Three writers, and the one that cannot participate
 
 The deployed vault has three writers on the same files: a human in Obsidian, agents
-over MCP, and MiraDesign over HTTP. Neither Miradian's suite nor MiraDesign's shared
-provider suite has a single concurrency case.
+over MCP, and MiraDesign over HTTP.
 
 What is actually true today:
 
@@ -143,6 +142,11 @@ What is actually true today:
 - `/api/v1` **refuses** an update that passes neither `expected_version` nor
   `"overwrite": true`, so a consumer cannot reach last-writer-wins by forgetting a
   parameter — only by asking for it.
+- Every read-modify-write on both surfaces now happens under one lock acquisition
+  (`Vault.edit`), so two callers cannot mutate the same live ruamel `CommentedMap`
+  at once. There are concurrency tests now, though they are honest about what they
+  show: they pin the behaviour, not the lock placement, because the vault index
+  lock already serialises a read against an in-flight write.
 
 What that does **not** give you: atomicity means nobody sees a half-written file, not
 that two writers cannot each land a complete write where the second silently discards
