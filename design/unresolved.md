@@ -82,7 +82,34 @@ MiraDesign writes its own HTTP adapter. That is the right boundary, but it means
 API contract is enforced only by `docs/api.md` and good intentions. If a second
 consumer appears, a small typed client or an OpenAPI document earns its keep.
 
-## 9. Rate of scanning
+## 9. The fastmcp 4.x / mcp 2.x port
+
+`requirements.txt` now pins `fastmcp>=3.4,<4` and `mcp>=1.28,<2`. Unpinned, the
+container resolved 4.x/2.x while the tests ran against 3.x/1.x, and the two
+disagree twice over:
+
+- `mcp` 2.x renamed `McpError` to `MCPError` (server.py now imports either).
+- Under fastmcp 4.x every `ctx.elicit` call raises, so all three human-approval
+  tools refuse unconditionally. It fails closed, so nothing becomes unsafe, but
+  `vault_create_tag` and friends stop working.
+
+Moving to 4.x is a deliberate port with its own testing, not something to let a
+resolver decide during a `docker build`. Unscheduled.
+
+## 10. Stateful MCP sessions
+
+`stateless_http` is now `False`. It had to change: under stateless HTTP the server
+cannot receive a client's answer to a request *it* made, so every elicitation
+response arrived with a request id no session remembered, the session crashed, and
+the tool call hung forever. All three approval-gated tools were unusable over the
+real transport and only ever worked in the in-process tests.
+
+Verified fixed end to end in the container (refuses unattended, registers with a
+human). The cost is that the server now holds per-session state, which matters if
+miradian is ever run as more than one replica. For a single-user private server it
+is the right trade, but it is a constraint that did not exist before.
+
+## 11. Rate of scanning
 
 Every poll triggers a full directory walk plus a stat per note (~30 ms at 1k notes,
 ~270 ms at 10k). At one consumer polling every few seconds this is free. It is not

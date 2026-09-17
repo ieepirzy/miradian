@@ -946,7 +946,17 @@ def project_documents(
 # App assembly
 # ---------------------------------------------------------------------------
 
-app = mcp.http_app(path=MCP_PATH, transport="http", stateless_http=True)
+# Stateful, not stateless. Under stateless_http the server cannot receive the
+# client's answer to a request it made: the elicitation reply arrives with a
+# request id no session remembers, the session crashes, and the tool call hangs
+# forever instead of returning. That silently disabled all three human-approval
+# tools over the real transport -- they only ever worked in the in-process tests,
+# where the round trip has a session to land in.
+#
+# It failed safe (a hung call widens nothing) but it failed, and the hang is
+# indistinguishable from a wedged agent. Sessions cost a little memory on a
+# single-user server and are what elicitation requires.
+app = mcp.http_app(path=MCP_PATH, transport="http", stateless_http=False)
 sse_app = mcp.http_app(path=SSE_PATH, transport="sse")
 
 # Serve both transports from one app so a single origo provider protects both.

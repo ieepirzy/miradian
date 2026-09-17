@@ -271,7 +271,7 @@ GET  /api/v1/projects
 GET  /api/v1/folders?project=
 GET  /api/v1/documents?project=&doc_type=&include_unstructured=&limit=&offset=
 GET  /api/v1/documents/get?id=          (or ?path= for documents with no uid)
-POST /api/v1/documents/create           {path, body, metadata, expected_version}
+POST /api/v1/documents/create           {path, body, metadata}
 POST /api/v1/documents/write            {id|path, body, metadata, expected_version}
 POST /api/v1/documents/patch-metadata   {id|path, set, unset, expected_version}
 POST /api/v1/documents/move             {id|path, to, expected_version}

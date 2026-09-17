@@ -18,6 +18,7 @@ ROOT = "03 🛠 Projects"
 KNOWLEDGE = "02 📚 Knowledge"
 TOKEN = "s3cret-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+OUTSIDE_UID = "a" * 32
 
 
 def write(base, rel: str, text: str) -> None:
@@ -26,12 +27,39 @@ def write(base, rel: str, text: str) -> None:
     p.write_text(text, encoding="utf-8")
 
 
+# The real vault's schema, in miniature. It has to be here for the
+# schema-does-not-apply test to mean anything: with no METADATA.md, schema loading
+# returns None and that test passes whether or not the API enforces a schema.
+METADATA = """---
+title: Vault frontmatter schema
+schema:
+  required: [title, tags, status, vault_type, summary]
+  enums:
+    status: [active, in-review, archived]
+    vault_type: [knowledge, project, idea]
+  tags: [ai, coding]
+  folders: {}
+---
+# Schema
+"""
+
+
 @pytest.fixture
 def client(tmp_path):
     vault_dir = tmp_path / "vault"
+    # At the vault root, outside PROJECT_ROOTS, so it never shows up in listings.
+    write(vault_dir, "METADATA.md", METADATA)
     write(vault_dir, f"{ROOT}/Loimi/plan.md", "---\ndoc_type: objective\ntitle: Plan\n---\n# Plan\n")
     write(vault_dir, f"{ROOT}/Loimi/notes.md", "# Ordinary notes\n")
     write(vault_dir, f"{KNOWLEDGE}/Tensor.md", "---\ndoc_type: work_item\n---\nDecoy\n")
+    # A note outside the roots that already carries a uid -- a template, an import,
+    # something a plugin wrote. It is addressable by id, so it is the probe for
+    # whether the scope guard actually holds on the by-id path.
+    write(
+        vault_dir,
+        f"{KNOWLEDGE}/Private.md",
+        f"---\ndoc_type: work_item\nuid: {OUTSIDE_UID}\n---\nPrivate knowledge.\n",
+    )
     service = DocumentService(Vault(vault_dir), [ROOT])
     journal = ChangeJournal(service, tmp_path / "state")
     app = create_api(service, journal, tokens={"miradesign": TOKEN}, capabilities={"links": False})
@@ -119,6 +147,54 @@ def test_a_move_cannot_escape_the_roots(client):
         headers=AUTH,
     )
     assert r.status_code == 403
+
+
+# A uid lookup searches the whole vault, so every verb has to be probed by id as
+# well as by path. Guarding only the supplied `path` left these reachable, with the
+# check landing after the file had already been written.
+
+
+def test_an_out_of_scope_document_is_not_readable_by_id(client):
+    r = client.get("/api/v1/documents/get", params={"id": OUTSIDE_UID}, headers=AUTH)
+    assert r.status_code == 403 and r.json()["error"] == "out_of_scope"
+
+
+def test_an_out_of_scope_document_is_not_writable_by_id(client):
+    before = (client.vault_dir / KNOWLEDGE / "Private.md").read_text(encoding="utf-8")
+    r = client.post(
+        "/api/v1/documents/write", json={"id": OUTSIDE_UID, "body": "clobbered"}, headers=AUTH
+    )
+    assert r.status_code == 403
+    assert (client.vault_dir / KNOWLEDGE / "Private.md").read_text(encoding="utf-8") == before
+
+
+def test_an_out_of_scope_document_is_not_patchable_by_id(client):
+    before = (client.vault_dir / KNOWLEDGE / "Private.md").read_text(encoding="utf-8")
+    r = client.post(
+        "/api/v1/documents/patch-metadata",
+        json={"id": OUTSIDE_UID, "set": {"status": "pwned"}},
+        headers=AUTH,
+    )
+    assert r.status_code == 403
+    assert (client.vault_dir / KNOWLEDGE / "Private.md").read_text(encoding="utf-8") == before
+
+
+def test_an_out_of_scope_document_is_not_deletable_by_id(client):
+    r = client.post("/api/v1/documents/delete", json={"id": OUTSIDE_UID}, headers=AUTH)
+    assert r.status_code == 403
+    assert (client.vault_dir / KNOWLEDGE / "Private.md").exists()
+
+
+def test_an_out_of_scope_document_cannot_be_moved_into_the_roots(client):
+    """The destination being in scope must not launder an out-of-scope source."""
+    r = client.post(
+        "/api/v1/documents/move",
+        json={"id": OUTSIDE_UID, "to": f"{ROOT}/Loimi/stolen.md"},
+        headers=AUTH,
+    )
+    assert r.status_code == 403
+    assert not (client.vault_dir / ROOT / "Loimi" / "stolen.md").exists()
+    assert (client.vault_dir / KNOWLEDGE / "Private.md").exists()
 
 
 # --- shape -----------------------------------------------------------------
@@ -243,17 +319,40 @@ def test_a_non_json_body_is_a_400_not_a_500(client):
     assert r.status_code == 400 and r.json()["error"] == "bad_request"
 
 
-def test_no_elicitation_prompt_on_an_ordinary_write(client):
-    """A backend consumer has no human attached; a write must never block on one."""
+def test_the_vault_schema_does_not_apply_to_this_surface(client):
+    """§4.1 of the design, and the load-bearing decision of the whole change.
+
+    The fixture vault has a METADATA.md requiring five fields with closed
+    vocabularies. This write breaks every one of them: no title/status/summary, an
+    unregistered tag, a vault_type outside the enum. It must still succeed, because
+    a service consumer has no human to approve widening any of them -- and on the
+    MCP surface those approvals are gated behind elicitation, which has no HTTP
+    analogue. Wire schema validation into the service layer and this test fails,
+    which is the point.
+    """
     r = client.post(
         "/api/v1/documents/create",
         json={
             "path": f"{ROOT}/Loimi/unvalidated.md",
-            "metadata": {"doc_type": "brand-new-type", "tags": ["a-tag-nobody-registered"]},
+            "metadata": {
+                "doc_type": "brand-new-type",
+                "tags": ["a-tag-nobody-registered"],
+                "vault_type": "not-in-the-enum",
+            },
         },
         headers=AUTH,
     )
-    assert r.status_code == 201
+    assert r.status_code == 201, r.json()
+
+
+def test_the_schema_note_is_loadable_so_the_test_above_is_not_vacuous(client):
+    """Guards the guard: if METADATA.md stopped parsing, the test above would pass
+    for the wrong reason."""
+    import schema as schema_mod
+
+    sch = schema_mod.load(client.service.vault)
+    assert sch is not None
+    assert "title" in sch.required and "vault_type" in sch.enums
 
 
 # --- changes ---------------------------------------------------------------

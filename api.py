@@ -127,6 +127,25 @@ def create_api(
                     "The document API only addresses project documents."
                 )
 
+    def resolve_in_scope(id: str | None = None, path: str | None = None) -> str:
+        """Resolve an id-or-path to an in-scope path, refusing before anything happens.
+
+        Every handler goes through this rather than checking the request's `path`
+        field, because a uid lookup searches the whole vault: any note anywhere
+        carrying a `uid:` -- a template, an import, something a plugin wrote -- is
+        addressable by id. Guarding only the supplied path left by-id writes and
+        deletes reaching outside the roots, with the check landing after the file
+        had already been modified.
+
+        Handlers pass the resolved path on instead of the caller's identifier, so
+        the document that gets written is provably the one that was checked.
+        """
+        if path:
+            guard_scope(path)
+        note = service.resolve(id=id, path=path)
+        guard_scope(note.rel)
+        return note.rel
+
     # --- reads -------------------------------------------------------------
 
     async def health(request: Request) -> JSONResponse:
@@ -180,10 +199,8 @@ def create_api(
 
     async def get_document(request: Request) -> JSONResponse:
         q = request.query_params
-        guard_scope(q.get("path"))
-        doc = service.read_document(id=q.get("id"), path=q.get("path"))
-        guard_scope(doc.path)
-        return JSONResponse({"document": doc.as_dict()})
+        rel = resolve_in_scope(q.get("id"), q.get("path"))
+        return JSONResponse({"document": service.read_document(path=rel).as_dict()})
 
     async def get_changes(request: Request) -> JSONResponse:
         q = request.query_params
@@ -211,52 +228,44 @@ def create_api(
 
     async def write_document(request: Request) -> JSONResponse:
         p = await _body(request)
-        guard_scope(p.get("path"))
         if "body" not in p:
             raise DocumentError("'body' is required. To change metadata only, use patch-metadata.")
+        rel = resolve_in_scope(p.get("id"), p.get("path"))
         doc = service.write_document(
-            id=p.get("id"),
-            path=p.get("path"),
+            path=rel,
             body=p["body"],
             metadata=p.get("metadata"),
             expected_version=p.get("expected_version"),
         )
-        guard_scope(doc.path)
         return JSONResponse({"document": doc.as_dict()})
 
     async def patch_metadata(request: Request) -> JSONResponse:
         p = await _body(request)
-        guard_scope(p.get("path"))
+        rel = resolve_in_scope(p.get("id"), p.get("path"))
         doc, missing = service.patch_metadata(
-            id=p.get("id"),
-            path=p.get("path"),
+            path=rel,
             set_fields=p.get("set"),
             unset_fields=p.get("unset"),
             expected_version=p.get("expected_version"),
         )
-        guard_scope(doc.path)
         return JSONResponse({"document": doc.as_dict(), "not_present": missing})
 
     async def move_document(request: Request) -> JSONResponse:
         p = await _body(request)
         if not p.get("to"):
             raise DocumentError("'to' is required: the new path for the document.")
-        guard_scope(p.get("path"), p["to"])
-        doc = service.move_document(
-            id=p.get("id"),
-            path=p.get("path"),
-            to=p["to"],
-            expected_version=p.get("expected_version"),
-        )
-        guard_scope(doc.path)
+        # Both ends are guarded: without the source check, a document from outside
+        # the roots could be pulled into the project tree by a caller who only ever
+        # names an in-scope destination.
+        guard_scope(p["to"])
+        rel = resolve_in_scope(p.get("id"), p.get("path"))
+        doc = service.move_document(path=rel, to=p["to"], expected_version=p.get("expected_version"))
         return JSONResponse({"document": doc.as_dict()})
 
     async def delete_document(request: Request) -> JSONResponse:
         p = await _body(request)
-        guard_scope(p.get("path"))
-        result = service.delete_document(
-            id=p.get("id"), path=p.get("path"), expected_version=p.get("expected_version")
-        )
+        rel = resolve_in_scope(p.get("id"), p.get("path"))
+        result = service.delete_document(path=rel, expected_version=p.get("expected_version"))
         return JSONResponse(result)
 
     routes = [
