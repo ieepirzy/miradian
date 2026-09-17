@@ -27,6 +27,12 @@ Base URL: `<MCP_BASE_URL>/api/v1`
 `id` is identity and `path` is location. Store the `id` on your durable rows; treat
 the `path` as display data you refresh from the change feed.
 
+**Project membership is derived from the path, not from metadata.** A document
+belongs to the project whose directory contains it. A `project` key in a document's
+frontmatter is stored and returned verbatim like any other field, but it is ignored
+for the `project` response field and for `?project=` filtering — so if the two
+disagree, the path wins. Move a document to change which project it is in.
+
 ### Structured vs. ordinary documents
 
 A project folder holds both project-management state and ordinary knowledge — design
@@ -168,7 +174,11 @@ The same object plus `body` — the Markdown after the frontmatter.
 ```
 
 `201` with the created document, including the uid assigned in the same round trip.
-`409 already_exists` if the path is taken.
+`409 already_exists` if the path is taken — miradian does not auto-suffix, because
+inventing a name is a naming policy and that belongs to the consumer.
+
+`path` is required: there is no create-where-you-like. Where a document lands decides
+which project it is in, so choosing that is the caller's decision, not a default.
 
 ### `POST /api/v1/documents/write`
 
