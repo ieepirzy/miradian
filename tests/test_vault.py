@@ -204,6 +204,55 @@ def test_write_is_atomic_and_leaves_no_temp_file(vault):
     assert f"{INBOX}/New Note.md" in vault.backlinks("Tensor")
 
 
+def test_edit_read_modify_write_has_no_lost_updates_under_concurrency(vault):
+    """Regression: vault_edit_note/vault_update_frontmatter used to call
+    vault.get() and vault.write_atomic() as two separate lock acquisitions, with
+    the read-modify step (a string replace or a frontmatter mutation) running
+    lock-free in between -- and, worse, vault.get() hands back the *same* Note
+    object held in the index rather than a copy, so concurrent callers were
+    mutating shared state with no lock at all. Two concurrent read-modify-write
+    calls on the same note could interleave as read A, read B, write A, write B:
+    B's write is built from a stale read and silently drops A's change (a lost
+    update), or -- since both callers may be mutating the very same
+    CommentedMap -- corrupt ruamel's internal bookkeeping outright.
+
+    Vault.edit() holds the lock across the whole read-transform-write, so N
+    concurrent increments of a frontmatter counter must land exactly N times,
+    with none lost and no corruption. Verified to fail (either wrong count or a
+    raised exception) against the old two-acquisition pattern.
+    """
+    vault.write_atomic(f"{INBOX}/Counter.md", "---\ncount: 0\n---\n# Counter\n")
+
+    def bump(note):
+        note.frontmatter["count"] = int(note.frontmatter["count"]) + 1
+        return join_frontmatter(note.frontmatter, note.body)
+
+    n = 20
+    errors: list[Exception] = []
+    barrier = threading.Barrier(n)
+    original_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # force frequent thread switches
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            vault.edit(f"{INBOX}/Counter.md", bump)
+        except Exception as e:  # noqa: BLE001 - any exception is a failure
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(original_interval)
+
+    assert not errors, f"concurrent edit raised: {errors[:3]}"
+    assert int(vault.get(f"{INBOX}/Counter.md").frontmatter["count"]) == n
+
+
 def test_write_refuses_non_markdown(vault):
     with pytest.raises(VaultError, match="Only .md"):
         vault.write_atomic(f"{INBOX}/evil.sh", "#!/bin/sh\n")

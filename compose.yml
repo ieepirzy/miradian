@@ -20,29 +20,36 @@ services:
       # own sequence numbers into it. Losing it is survivable -- consumers get
       # `reset: true` and re-ingest -- but losing it on every restart is wasteful.
       - miradian-state:/state
+      - miradian_data:/data
     environment:
       VAULT_PATH: /vault
+      # origo's own OAuth-state persistence, pointed at the miradian_data volume
+      # below so tokens/refresh tokens/pending codes survive restarts *and*
+      # redeploys, not just restarts. `docker compose down -v` deletes it.
+      ORIGO_STORAGE_PATH: /data
       STATE_DIR: /state
       PROJECT_ROOTS: ${PROJECT_ROOTS:-}
       DOC_TYPE_FIELD: ${DOC_TYPE_FIELD:-doc_type}
       UID_FIELD: ${UID_FIELD:-uid}
       ASSIGN_UID: ${ASSIGN_UID:-true}
       MIRADIAN_API_TOKENS: ${MIRADIAN_API_TOKENS:-}
+      MCP_STATELESS_HTTP: ${MCP_STATELESS_HTTP:-true}
       MCP_BASE_URL: ${MCP_BASE_URL}
       MCP_CLIENT_ID: ${MCP_CLIENT_ID:-miradian}
       MCP_CLIENT_SECRET: ${MCP_CLIENT_SECRET}
       MCP_REDIRECT_URIS: ${MCP_REDIRECT_URIS:-}
       MCP_AUTO_APPROVE: ${MCP_AUTO_APPROVE:-true}
       MCP_PUBLIC_REGISTRATION: ${MCP_PUBLIC_REGISTRATION:-false}
+      MCP_ANY_REDIRECT_URI: ${MCP_ANY_REDIRECT_URI:-false}
       MCP_TOKEN_TTL: ${MCP_TOKEN_TTL:-3600}
       MCP_REFRESH_TOKEN_TTL: ${MCP_REFRESH_TOKEN_TTL:-2592000}
       MCP_PATH: ${MCP_PATH:-/mcp}
       SSE_PATH: ${SSE_PATH:-/sse}
     ports:
-      - "127.0.0.1:${PORT:-27125}:8000"
       - "${BOUND_IP:-127.0.0.1}:${PORT:-27125}:8000"
     security_opt:
       - no-new-privileges:true
 
 volumes:
   miradian-state:
+  miradian_data:

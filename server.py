@@ -30,7 +30,7 @@ import schema as schema_mod
 from api import ApiDispatcher, create_api, parse_tokens
 from changes import ChangeJournal
 from documents import DocumentError, DocumentService, apply_metadata
-from vault import Vault, VaultError, join_frontmatter
+from vault import Note, Vault, VaultError, join_frontmatter
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("miradian")
@@ -83,6 +83,14 @@ STATELESS_HTTP = _env("MCP_STATELESS_HTTP", "true").lower() != "false"
 TOKEN_TTL = int(_env("MCP_TOKEN_TTL", "3600"))
 REFRESH_TOKEN_TTL = int(_env("MCP_REFRESH_TOKEN_TTL", str(30 * 24 * 3600)))
 PORT = int(_env("PORT", "8000"))
+
+# Opts the seeded client out of exact redirect_uri matching at /authorize (origo's
+# ANY_REDIRECT_URI sentinel). For connector surfaces with undocumented/churning
+# callback URLs. MCP_CLIENT_SECRET still gates /token either way — see origo's
+# README ("Redirect URIs for pre-registered clients") for the full trade-off.
+# It takes precedence over MCP_REDIRECT_URIS: asking for "any" while also naming
+# an allowlist is contradictory, and the explicit opt-in is the clearer intent.
+ALLOW_ANY_REDIRECT_URI = _env("MCP_ANY_REDIRECT_URI", "false").lower() == "true"
 
 # Stamp agent-written notes so they are greppable and distinguishable from your
 # own. On by default -- knowing which notes a model wrote is worth more than a
@@ -150,6 +158,34 @@ API_CAPABILITIES = {
     "search": False,
     "schema": False,
 }
+
+def _redirect_policy():
+    from origo import ANY_REDIRECT_URI
+
+    """Which redirect_uris the seeded client may use.
+
+    Three states, and the unset one is the dangerous default origo ships with:
+    passing None means origo accepts ANY redirect_uri, so anyone who learns the
+    client id can have an auth code delivered to a URI they control. The
+    startup warning below exists for exactly that case.
+
+    MCP_ANY_REDIRECT_URI is the *deliberate* version of the same thing, for
+    connector surfaces whose callback URLs churn. It wins over an allowlist:
+    asking for "any" while also naming specific URIs is contradictory, and the
+    explicit opt-in is the clearer statement of intent.
+    """
+    if ALLOW_ANY_REDIRECT_URI:
+        # A list, not the bare sentinel. origo seeds redirect_uris as
+        # dict[str, list[str]] and only sets its wildcard flag when the
+        # sentinel *is* the whole allowlist; handed the bare string it falls
+        # back to exact matching against "any", which rejects every real
+        # redirect_uri. Fails closed, so it is not a hole -- but it locks out
+        # exactly the connector the flag exists to admit.
+        return {CLIENT_ID: [ANY_REDIRECT_URI]}
+    if REDIRECT_URIS:
+        return {CLIENT_ID: REDIRECT_URIS}
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
@@ -811,29 +847,38 @@ def vault_edit_note(
     Preferred over vault_write_note for edits: it cannot accidentally drop content
     the agent did not read.
     """
+    outcome: dict[str, int] = {}
+
+    def _transform(note: Note) -> str:
+        full_text = join_frontmatter(note.frontmatter, note.body)
+        count = full_text.count(old_string)
+
+        if count == 0:
+            raise VaultError(
+                f"text not found in `{note.rel}`. Read the note with vault_read_note and match the text exactly, including whitespace."
+            )
+        if count > 1 and not replace_all:
+            raise VaultError(
+                f"text appears {count} times in `{note.rel}`. Include more surrounding "
+                "context to make it unique, or pass replace_all=true."
+            )
+
+        outcome["count"] = count
+        return full_text.replace(old_string, new_string) if replace_all else full_text.replace(old_string, new_string, 1)
+
+    # The read (vault.get), the replace, and the write happen under one lock
+    # acquisition (see Vault.edit) so a concurrent edit of the same note can't
+    # sneak in between the read and the write and have its change silently
+    # overwritten by this call's stale-based write.
     try:
-        note = vault.get(path)
+        rel = vault.edit(path, _transform)
     except VaultError as e:
         return f"Error: {e}"
+    except OSError as e:
+        return f"Error: could not write `{path}` ({e})."
 
-    full_text = join_frontmatter(note.frontmatter, note.body)
-    count = full_text.count(old_string)
-
-    if count == 0:
-        return f"Error: text not found in `{note.rel}`. Read the note with vault_read_note and match the text exactly, including whitespace."
-    if count > 1 and not replace_all:
-        return (
-            f"Error: text appears {count} times in `{note.rel}`. Include more surrounding "
-            "context to make it unique, or pass replace_all=true."
-        )
-
-    updated = full_text.replace(old_string, new_string) if replace_all else full_text.replace(old_string, new_string, 1)
-    try:
-        vault.write_atomic(note.rel, updated)
-    except (VaultError, OSError) as e:
-        return f"Error: could not write `{note.rel}` ({e})."
-
-    return f"Edited `{note.rel}` ({count if replace_all else 1} replacement(s))."
+    count = outcome["count"]
+    return f"Edited `{rel}` ({count if replace_all else 1} replacement(s))."
 
 
 @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
@@ -843,38 +888,46 @@ def vault_update_frontmatter(
     unset_fields: Annotated[list[str] | None, Field(description="Field names to remove.")] = None,
 ) -> str:
     """Add, change, or remove frontmatter fields, leaving the body and key order intact."""
-    try:
-        note = vault.get(path)
-    except VaultError as e:
-        return f"Error: {e}"
-
     if not set_fields and not unset_fields:
         return "Error: nothing to do — supply set_fields, unset_fields, or both."
 
-    # Same primitive the JSON API patches with, so set/unset means one thing in
-    # this server. The *policy* below it is what differs between the two surfaces:
-    # this one enforces the vault's frontmatter schema, the service surface does
-    # not, because a headless consumer has no human to approve a new tag.
-    fm = note.frontmatter
-    missing = apply_metadata(fm, set_fields, unset_fields)
+    missing: list[str] = []
 
-    # Same gate as vault_write_note. Without it this tool is a way round the
-    # schema: set status to anything, or unset a required field.
-    sch = _schema()
-    if sch:
-        schema_mod.normalize(fm, sch)
-        errors = schema_mod.validate(fm, note.rel, sch)
-        if errors and SCHEMA_MODE == "strict":
-            return "Error: that change would break the vault schema.\n\n" + "\n".join(
-                f"- {e}" for e in errors
-            )
+    def _transform(note: Note) -> str:
+        # Same primitive the JSON API patches with, so set/unset means one thing
+        # in this server. The *policy* below is what differs between the two
+        # surfaces: this one enforces the vault's frontmatter schema, the service
+        # surface does not, because a headless consumer has no human to approve
+        # a new tag.
+        fm = note.frontmatter
+        missing.extend(apply_metadata(fm, set_fields, unset_fields))
 
+        # Same gate as vault_write_note. Without it this tool is a way round the
+        # schema: set status to anything, or unset a required field. It runs
+        # inside the transform, and so under Vault.edit's lock, because validating
+        # outside would validate a read that the write no longer matches.
+        sch = _schema()
+        if sch:
+            schema_mod.normalize(fm, sch)
+            errors = schema_mod.validate(fm, note.rel, sch)
+            if errors and SCHEMA_MODE == "strict":
+                raise VaultError(
+                    "that change would break the vault schema.\n\n"
+                    + "\n".join(f"- {e}" for e in errors)
+                )
+        return join_frontmatter(fm, note.body)
+
+    # See vault_edit_note: the read, the frontmatter mutation, and the write
+    # happen under one lock acquisition (Vault.edit) so a concurrent edit of the
+    # same note can't land in the gap and be silently overwritten.
     try:
-        vault.write_atomic(note.rel, join_frontmatter(fm, note.body))
-    except (VaultError, OSError) as e:
-        return f"Error: could not write `{note.rel}` ({e})."
+        rel = vault.edit(path, _transform)
+    except VaultError as e:
+        return f"Error: {e}"
+    except OSError as e:
+        return f"Error: could not write `{path}` ({e})."
 
-    msg = f"Updated frontmatter on `{note.rel}`."
+    msg = f"Updated frontmatter on `{rel}`."
     if missing:
         msg += f" (Not present, so not removed: {', '.join(missing)}.)"
     return msg
@@ -986,7 +1039,7 @@ if not NO_AUTH:
     auth = OAuthProvider(
         base_url=BASE_URL,
         clients={CLIENT_ID: CLIENT_SECRET},
-        client_redirect_uris={CLIENT_ID: REDIRECT_URIS} if REDIRECT_URIS else None,
+        client_redirect_uris=_redirect_policy(),
         auto_approve=AUTO_APPROVE,
         public_registration=PUBLIC_REGISTRATION,
         token_ttl=TOKEN_TTL,

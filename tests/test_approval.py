@@ -149,3 +149,66 @@ async def test_folder_with_an_unknown_vault_type_is_refused(srv):
 async def test_update_schema_rejects_a_field_that_is_not_a_vocabulary(srv):
     out = await _call(srv, approve, "vault_update_schema", {"field": "title", "value": "x"})
     assert "not a controlled vocabulary" in out
+
+
+# --- redirect_uri policy ----------------------------------------------------
+#
+# Not about approval, but it lives here because this file already owns the
+# "reload server with env set" fixture. The sentinel is the kind of thing that
+# fails closed and therefore looks fine until the connector it exists for cannot
+# log in.
+
+
+def _reload(monkeypatch, tmp_path, **env):
+    monkeypatch.setenv("VAULT_PATH", str(tmp_path))
+    monkeypatch.setenv("MCP_NO_AUTH", "true")
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    import importlib
+
+    import server
+
+    return importlib.reload(server)
+
+
+@pytest.mark.asyncio
+async def test_any_redirect_uri_is_seeded_as_a_list_not_a_bare_sentinel(monkeypatch, tmp_path):
+    """origo only sets its wildcard flag when the sentinel is the whole allowlist.
+
+    Handed the bare string it falls back to exact matching against "any" and
+    rejects every real redirect_uri -- fail-closed, so not a hole, but it locks
+    out exactly the connector MCP_ANY_REDIRECT_URI exists to admit.
+    """
+    from origo import ANY_REDIRECT_URI
+
+    srv = _reload(monkeypatch, tmp_path, MCP_ANY_REDIRECT_URI="true")
+    policy = srv._redirect_policy()
+
+    assert policy == {srv.CLIENT_ID: [ANY_REDIRECT_URI]}
+    assert isinstance(policy[srv.CLIENT_ID], list)
+
+
+@pytest.mark.asyncio
+async def test_an_allowlist_is_passed_through(monkeypatch, tmp_path):
+    srv = _reload(monkeypatch, tmp_path, MCP_REDIRECT_URIS="https://a.example/cb,https://b.example/cb")
+    assert srv._redirect_policy() == {
+        srv.CLIENT_ID: ["https://a.example/cb", "https://b.example/cb"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_any_redirect_uri_wins_over_an_allowlist(monkeypatch, tmp_path):
+    """Asking for "any" while also naming URIs is contradictory; the opt-in wins."""
+    from origo import ANY_REDIRECT_URI
+
+    srv = _reload(
+        monkeypatch, tmp_path, MCP_ANY_REDIRECT_URI="true", MCP_REDIRECT_URIS="https://a.example/cb"
+    )
+    assert srv._redirect_policy() == {srv.CLIENT_ID: [ANY_REDIRECT_URI]}
+
+
+@pytest.mark.asyncio
+async def test_no_configuration_means_no_allowlist(monkeypatch, tmp_path):
+    """None is origo's accept-anything default, which the startup warning covers."""
+    srv = _reload(monkeypatch, tmp_path)
+    assert srv._redirect_policy() is None
