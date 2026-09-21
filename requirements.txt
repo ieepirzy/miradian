@@ -1,13 +1,17 @@
-# Pinned to a major, not left open. Unpinned, the container resolved fastmcp 4.x /
-# mcp 2.x while the tests ran against 3.x/1.x, and the two disagree in ways that
-# build green and then misbehave at runtime:
-#   * mcp 2.x renamed McpError to MCPError, so the image died on import.
-#   * under fastmcp 4.x every ctx.elicit call raises, so the human-approval gate on
-#     schema changes refuses unconditionally -- it fails closed, so nothing becomes
-#     unsafe, but vault_create_tag and friends stop working entirely.
-# Moving to 4.x is a deliberate port, not a resolver's choice. See design/unresolved.md.
-fastmcp>=3.4,<4
-mcp>=1.28,<2
+# Ported to fastmcp 4.x / mcp 2.x (2026-09-21, see design/unresolved.md #9): mcp
+# 1.x tops out at protocol version 2025-11-25, so any client negotiating the
+# 2026-07-28 era (mcp 2.x's LATEST_PROTOCOL_VERSION) was rejected outright at the
+# transport layer before a single tool call could run.
+#
+# server.py already imports McpError/MCPError defensively, so that half of the
+# old blocker was never a real problem. The other half is real and permanent:
+# under protocol era 2026-07-28 (SEP-2322/2575) the MCP spec itself removed the
+# server-initiated elicitation back-channel, so ctx.elicit fails closed for
+# every modern client, not just unattended ones. vault_create_tag and friends
+# refuse with a clear error instead of the old silent hang; see design/unresolved.md
+# #11 for the guard-pattern migration that would restore them.
+fastmcp>=4,<5
+mcp>=2,<3
 origo>=0.3.0
 ruamel.yaml>=0.18
 starlette>=0.40

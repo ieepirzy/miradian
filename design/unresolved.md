@@ -93,19 +93,25 @@ MiraDesign writes its own HTTP adapter. That is the right boundary, but it means
 API contract is enforced only by `docs/api.md` and good intentions. If a second
 consumer appears, a small typed client or an OpenAPI document earns its keep.
 
-## 9. The fastmcp 4.x / mcp 2.x port
+## 9. The fastmcp 4.x / mcp 2.x port — done
 
-`requirements.txt` now pins `fastmcp>=3.4,<4` and `mcp>=1.28,<2`. Unpinned, the
-container resolved 4.x/2.x while the tests ran against 3.x/1.x, and the two
-disagree twice over:
+Shipped 2026-09-21. `requirements.txt` now pins `fastmcp>=4,<5` and `mcp>=2,<3`.
 
-- `mcp` 2.x renamed `McpError` to `MCPError` (server.py now imports either).
-- Under fastmcp 4.x every `ctx.elicit` call raises, so all three human-approval
-  tools refuse unconditionally. It fails closed, so nothing becomes unsafe, but
-  `vault_create_tag` and friends stop working.
+The trigger: a client negotiating protocol era 2026-07-28 (`mcp` 2.x's
+`LATEST_PROTOCOL_VERSION`) was rejected outright at the transport layer by the old
+`mcp>=1.28,<2` pin, which tops out at `2025-11-25` — every tool, not just the
+approval-gated ones, was unreachable for any client on current-generation SDKs.
 
-Moving to 4.x is a deliberate port with its own testing, not something to let a
-resolver decide during a `docker build`. Unscheduled.
+The two disagreements this pin previously avoided turned out to be one real and one
+already handled:
+
+- `mcp` 2.x renamed `McpError` to `MCPError` — `server.py` already imported either
+  defensively, so this was never actually a blocker.
+- Under fastmcp 4.x every `ctx.elicit` call raises for a client on the 2026-07-28
+  era specifically — not a fastmcp bug, see #12: the spec removed the back-channel
+  it needs. 186/197 tests pass unchanged; the 11 that exercise an elicitation
+  accept/decline/cancel round-trip are `xfail(strict=True)` in
+  `tests/test_approval.py`, not deleted — see #12.
 
 ## 10. Stateful MCP sessions — needs Ilari's call
 
@@ -128,6 +134,38 @@ So: flip it, confirm the connector still works, and keep it off. The gate fails
 closed either way, so leaving it on regresses nothing that ever worked — it just
 leaves `vault_create_tag`, `vault_create_folder` and `vault_update_schema`
 unusable, which is the status quo.
+
+Superseded in part by #12: for any client on the 2026-07-28 protocol era, stateful
+sessions would no longer be enough on their own — imperative `ctx.elicit` fails
+closed on that era regardless of transport, because the spec removed the
+back-channel it needs, not because the session forgot the request id. Flipping
+`MCP_STATELESS_HTTP` would only restore the gate for clients still negotiating an
+older era, which may be none in practice by the time anyone gets to this.
+
+## 12. Elicitation is gone for modern clients — the approval gate needs the guard pattern
+
+The three approval-gated tools' human-in-the-loop gate (`_require_approval` in
+`server.py`) uses imperative `ctx.elicit`: ask a mid-tool-call question, block on
+the answer. Protocol era 2026-07-28 (SEP-2322/2575) removed the server-initiated
+back-channel that requires, permanently — not a version fastmcp or mcp can restore
+by patching. fastmcp 4.x detects a modern-era connection and raises a clear error
+instead of hanging (`elicitation via server-initiated requests is unavailable on
+2026-07-28 connections`), which `_require_approval`'s existing `except (McpError,
+ToolError)` already folds into the same "no elicitation support" refusal it always
+gave unattended agents. So today: fails closed, safely, for every client on this
+SDK generation — human-attended or not, stateless or stateful. Nothing unsafe, but
+`vault_create_tag` and friends are unusable for real deployed clients, which by now
+all negotiate the modern era.
+
+fastmcp's replacement is the guard/background-task pattern: a tool returns
+`InputRequiredResult` instead of blocking, and reads the human's answer from
+`ctx.input_responses` / `ctx.request_state` on a later re-run. Restoring the
+approval gate for modern clients means rewriting `_require_approval` around that,
+which changes the tool's call shape (a client must now poll or resume a background
+task rather than getting one synchronous response) — a real design change, not a
+drop-in swap. Unscheduled; the `xfail(strict=True)` tests in `tests/test_approval.py`
+will start failing (i.e. unexpectedly passing) the day this lands, which is the
+point.
 
 ## 11. Three writers, and the one that cannot participate
 
