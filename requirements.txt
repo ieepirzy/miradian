@@ -12,7 +12,7 @@
 # #11 for the guard-pattern migration that would restore them.
 fastmcp>=4,<5
 mcp>=2,<3
-origo>=0.3.0
+origo>=0.3.0,<0.4
 ruamel.yaml>=0.18
 starlette>=0.40
 uvicorn[standard]>=0.30
